@@ -5,7 +5,7 @@ import {
   Trash2, Landmark, Check, HelpCircle, FileSpreadsheet, Eye, History, Clock
 } from 'lucide-react';
 import { Contract, ContractStatus, AuditLog } from '../types';
-import { getContracts, saveContracts, addAuditLog, getAuditLogs, resetDBData, supabase, syncWithSupabase, retrieveVideoUrl } from '../services/db';
+import { getContracts, saveContracts, addAuditLog, getAuditLogs, resetDBData, supabase, syncWithSupabase, retrieveVideoUrl, deleteContract } from '../services/db';
 import LegalReport from './LegalReport';
 
 // Robust Brazilian CPF Validator function
@@ -357,10 +357,10 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
     }
   };
 
-  const handleDeleteContract = (id: string) => {
+  const handleDeleteContract = async (id: string) => {
     if (window.confirm('Tem certeza de que deseja excluir este contrato permanentemente?')) {
-      const remaining = contracts.filter(c => c.id !== id);
-      saveContracts(remaining);
+      await deleteContract(id);
+      const remaining = getContracts();
       setContracts(remaining);
       if (selectedContract?.id === id) {
         setSelectedContract(null);

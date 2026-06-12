@@ -328,12 +328,45 @@ export function getAuditLogs(contractId?: string): AuditLog[] {
   return logs;
 }
 
+// Prioritize contract status levels for merging
+function mergeTwoContracts(local: Contract, remote: Contract): Contract {
+  const statusOrder: { [key in ContractStatus]: number } = {
+    [ContractStatus.PENDING]: 1,
+    [ContractStatus.RECORDED]: 2,
+    [ContractStatus.APPROVED]: 3,
+    [ContractStatus.REJECTED]: 3,
+  };
+  
+  const localWeight = statusOrder[local.status as ContractStatus] || 1;
+  const remoteWeight = statusOrder[remote.status as ContractStatus] || 1;
+  
+  if (localWeight > remoteWeight) {
+    return local;
+  } else if (remoteWeight > localWeight) {
+    return remote;
+  }
+  
+  // If weights are equal, check other parameters
+  if (local.signatureImage && !remote.signatureImage) {
+    return local;
+  }
+  if (!local.signatureImage && remote.signatureImage) {
+    return remote;
+  }
+  
+  if (local.verifiedAt && remote.verifiedAt) {
+    return new Date(local.verifiedAt) > new Date(remote.verifiedAt) ? local : remote;
+  }
+  
+  return remote;
+}
+
 // Sync with Supabase on mount
 export async function syncWithSupabase(): Promise<{ contracts: Contract[], logs: AuditLog[] } | null> {
   if (!supabase) return null;
   
   try {
-    // 1. Fetch contracts
+    // 1. Fetch contracts from Supabase
     const { data: dbContracts, error: contractsError } = await supabase
       .from('contracts')
       .select('*')
@@ -341,7 +374,7 @@ export async function syncWithSupabase(): Promise<{ contracts: Contract[], logs:
       
     if (contractsError) throw contractsError;
     
-    // 2. Fetch logs
+    // 2. Fetch logs from Supabase
     const { data: dbLogs, error: logsError } = await supabase
       .from('audit_logs')
       .select('*')
@@ -352,50 +385,120 @@ export async function syncWithSupabase(): Promise<{ contracts: Contract[], logs:
     const localContracts = getContracts();
     const localLogs = getAuditLogs();
 
-    // Prevent blank local wipeouts if Supabase returns empty rows (e.g. newly provisioned or cleared db)
-    // We synchronize local contracts/logs upward to populate the database
-    if ((!dbContracts || dbContracts.length === 0) && localContracts.length > 0) {
-      const dbContractsToInsert = localContracts.map(mapToDbContract);
-      await supabase.from('contracts').upsert(dbContractsToInsert);
-      
-      if (localLogs.length > 0) {
-        const dbLogsToInsert = localLogs.map(log => ({
-          id: log.id,
-          contract_id: log.contractId,
-          action: log.action,
-          timestamp: log.timestamp,
-          description: log.description
-        }));
-        await supabase.from('audit_logs').upsert(dbLogsToInsert);
-      }
-      
-      return { contracts: localContracts, logs: localLogs };
-    }
-
-    const mappedContracts = (dbContracts || []).map(mapToLocalContract);
-    const mappedLogs = (dbLogs || []).map(row => ({
+    const remoteContractsMapped = (dbContracts || []).map(mapToLocalContract);
+    const remoteLogsMapped = (dbLogs || []).map(row => ({
       id: row.id,
       contractId: row.contract_id || row.contractId,
       action: row.action,
       timestamp: row.timestamp,
       description: row.description
     }));
+
+    // 3. Smart Merge Contracts without destructive wipeouts
+    const mergedContractsMap = new Map<string, Contract>();
     
-    // Safely sync into local cached copy
-    if (mappedContracts.length > 0) {
-      localStorage.setItem(CONTRACTS_KEY, JSON.stringify(mappedContracts));
+    // Populate with remote contracts first
+    remoteContractsMapped.forEach(remoteContract => {
+      mergedContractsMap.set(remoteContract.id, remoteContract);
+    });
+
+    const localOnlyContractsToUpload: Contract[] = [];
+
+    // Merge in local contracts
+    localContracts.forEach(localContract => {
+      const existing = mergedContractsMap.get(localContract.id);
+      if (existing) {
+        // If contract exists in both places, merge them
+        const merged = mergeTwoContracts(localContract, existing);
+        mergedContractsMap.set(localContract.id, merged);
+      } else {
+        // Exists locally but not on Supabase (newly created and not synced yet)
+        mergedContractsMap.set(localContract.id, localContract);
+        localOnlyContractsToUpload.push(localContract);
+      }
+    });
+
+    const finalMergedContracts = Array.from(mergedContractsMap.values())
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    // 4. Smart Merge Audit Logs
+    const mergedLogsMap = new Map<string, AuditLog>();
+    remoteLogsMapped.forEach(log => {
+      mergedLogsMap.set(log.id, log);
+    });
+
+    const localOnlyLogsToUpload: AuditLog[] = [];
+    localLogs.forEach(log => {
+      if (!mergedLogsMap.has(log.id)) {
+        mergedLogsMap.set(log.id, log);
+        localOnlyLogsToUpload.push(log);
+      }
+    });
+
+    const finalMergedLogs = Array.from(mergedLogsMap.values())
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    // 5. Save the cleanMerged states back to local cache
+    localStorage.setItem(CONTRACTS_KEY, JSON.stringify(finalMergedContracts));
+    localStorage.setItem(LOGS_KEY, JSON.stringify(finalMergedLogs));
+
+    // 6. Asynchronously upload local-only additions up to Supabase to keep them backed up
+    if (localOnlyContractsToUpload.length > 0) {
+      const toInsert = localOnlyContractsToUpload.map(mapToDbContract);
+      supabase.from('contracts').upsert(toInsert).then(({ error }) => {
+        if (error) console.error('Error uploading local-only contracts to Supabase:', error);
+      });
     }
-    if (mappedLogs.length > 0) {
-      localStorage.setItem(LOGS_KEY, JSON.stringify(mappedLogs));
+
+    if (localOnlyLogsToUpload.length > 0) {
+      const toInsertLogs = localOnlyLogsToUpload.map(log => ({
+        id: log.id,
+        contract_id: log.contractId,
+        action: log.action,
+        timestamp: log.timestamp,
+        description: log.description
+      }));
+      supabase.from('audit_logs').insert(toInsertLogs).then(({ error }) => {
+        if (error) console.error('Error uploading local-only logs to Supabase:', error);
+      });
     }
-    
+
     return { 
-      contracts: mappedContracts.length > 0 ? mappedContracts : localContracts, 
-      logs: mappedLogs.length > 0 ? mappedLogs : localLogs 
+      contracts: finalMergedContracts, 
+      logs: finalMergedLogs 
     };
   } catch (error) {
     console.error('Error syncing from Supabase API:', error);
     return null;
+  }
+}
+
+// Clean and safe full deletion from both local cache and Supabase
+export async function deleteContract(id: string): Promise<void> {
+  const contracts = getContracts();
+  const remaining = contracts.filter(c => c.id !== id);
+  localStorage.setItem(CONTRACTS_KEY, JSON.stringify(remaining));
+
+  // Remove corresponding logs too
+  const logs = getAuditLogs();
+  const remainingLogs = logs.filter(l => l.contractId !== id);
+  localStorage.setItem(LOGS_KEY, JSON.stringify(remainingLogs));
+
+  if (supabase) {
+    try {
+      // Execute the delete operation on Supabase tables
+      const { error: contractDbErr } = await supabase.from('contracts').delete().eq('id', id);
+      if (contractDbErr) {
+        console.error('Error deleting contract row on Supabase:', contractDbErr);
+      }
+      
+      const { error: logsDbErr } = await supabase.from('audit_logs').delete().eq('contract_id', id);
+      if (logsDbErr) {
+        console.error('Error deleting logs on Supabase:', logsDbErr);
+      }
+    } catch (err) {
+      console.error('Unexpected error deleting resource from Supabase:', err);
+    }
   }
 }
 
