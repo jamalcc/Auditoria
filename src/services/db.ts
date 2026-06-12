@@ -349,6 +349,29 @@ export async function syncWithSupabase(): Promise<{ contracts: Contract[], logs:
       
     if (logsError) throw logsError;
     
+    const localContracts = getContracts();
+    const localLogs = getAuditLogs();
+
+    // Prevent blank local wipeouts if Supabase returns empty rows (e.g. newly provisioned or cleared db)
+    // We synchronize local contracts/logs upward to populate the database
+    if ((!dbContracts || dbContracts.length === 0) && localContracts.length > 0) {
+      const dbContractsToInsert = localContracts.map(mapToDbContract);
+      await supabase.from('contracts').upsert(dbContractsToInsert);
+      
+      if (localLogs.length > 0) {
+        const dbLogsToInsert = localLogs.map(log => ({
+          id: log.id,
+          contract_id: log.contractId,
+          action: log.action,
+          timestamp: log.timestamp,
+          description: log.description
+        }));
+        await supabase.from('audit_logs').upsert(dbLogsToInsert);
+      }
+      
+      return { contracts: localContracts, logs: localLogs };
+    }
+
     const mappedContracts = (dbContracts || []).map(mapToLocalContract);
     const mappedLogs = (dbLogs || []).map(row => ({
       id: row.id,
@@ -366,7 +389,10 @@ export async function syncWithSupabase(): Promise<{ contracts: Contract[], logs:
       localStorage.setItem(LOGS_KEY, JSON.stringify(mappedLogs));
     }
     
-    return { contracts: mappedContracts, logs: mappedLogs };
+    return { 
+      contracts: mappedContracts.length > 0 ? mappedContracts : localContracts, 
+      logs: mappedLogs.length > 0 ? mappedLogs : localLogs 
+    };
   } catch (error) {
     console.error('Error syncing from Supabase API:', error);
     return null;
