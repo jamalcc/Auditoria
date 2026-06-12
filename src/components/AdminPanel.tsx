@@ -5,7 +5,7 @@ import {
   Trash2, Landmark, Check, HelpCircle, FileSpreadsheet, Eye, History, Clock
 } from 'lucide-react';
 import { Contract, ContractStatus, AuditLog } from '../types';
-import { getContracts, saveContracts, addAuditLog, getAuditLogs, resetDBData, supabase, syncWithSupabase, getVideoBlob } from '../services/db';
+import { getContracts, saveContracts, addAuditLog, getAuditLogs, resetDBData, supabase, syncWithSupabase, retrieveVideoUrl } from '../services/db';
 import LegalReport from './LegalReport';
 
 // Robust Brazilian CPF Validator function
@@ -149,17 +149,19 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
     };
   }, []);
 
-  // Fetch and manage recorded video blob object url on contract selection
+  // Fetch and manage recorded video URL on contract selection
   useEffect(() => {
     let active = true;
     let localUrl: string | null = null;
 
     if (selectedContract && selectedContract.status !== ContractStatus.PENDING) {
-      getVideoBlob(selectedContract.id).then((blob) => {
+      retrieveVideoUrl(selectedContract.id).then((url) => {
         if (active) {
-          if (blob) {
-            localUrl = URL.createObjectURL(blob);
-            setVideoUrl(localUrl);
+          if (url) {
+            if (url.startsWith('blob:')) {
+              localUrl = url;
+            }
+            setVideoUrl(url);
           } else {
             setVideoUrl(null);
           }
@@ -300,7 +302,11 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
       if (c.id === id) {
         return {
           ...c,
-          createdAt: new Date().toISOString()
+          status: ContractStatus.PENDING,
+          createdAt: new Date().toISOString(),
+          rejectionReason: undefined,
+          videoBlobKey: undefined,
+          signatureImage: undefined
         };
       }
       return c;
@@ -900,6 +906,18 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                               </div>
                             </div>
                           )}
+                        </div>
+                      )}
+
+                      {(selectedContract.status === ContractStatus.APPROVED || selectedContract.status === ContractStatus.REJECTED) && (
+                        <div className="space-y-2 border-t border-slate-100 pt-3">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">AÇÕES CORRETIVAS</span>
+                          <button
+                            onClick={() => handleRenewLink(selectedContract.id)}
+                            className="w-full py-2 bg-indigo-50 border border-indigo-100 hover:bg-indigo-100 text-indigo-700 rounded-xl text-center font-bold text-[10.5px] transition flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" /> Reativar Link (Permitir Envio Novamente)
+                          </button>
                         </div>
                       )}
                     </div>

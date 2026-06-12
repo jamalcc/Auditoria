@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Camera, Mic, MapPin, AlertCircle, RefreshCw, CheckCircle, Video, Check, Square, Shield, Eye, PenTool, Clock } from 'lucide-react';
 import { Contract, ContractStatus, ClientMetadata } from '../types';
-import { saveVideoBlob, addAuditLog, saveContracts, getContracts } from '../services/db';
+import { saveVideoBlob, addAuditLog, saveContracts, getContracts, uploadVideoToSupabase, syncWithSupabase } from '../services/db';
 
 interface ClientWizardProps {
   contractId: string;
@@ -94,21 +94,34 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
 
   // Load contract details and user IP
   useEffect(() => {
-    const contracts = getContracts();
-    const currentContract = contracts.find(c => c.id === contractId);
-    if (currentContract) {
-      const createdTime = new Date(currentContract.createdAt).getTime();
-      const isExpired = (Date.now() - createdTime) > 24 * 60 * 60 * 1000;
-      
-      if (isExpired && currentContract.status === 'Pendente') {
-        setErrorMessage('Este link de formalização expirou por exceder o limite de 24 horas. Por favor, entre em contato com o suporte ou operador da promotora financeira para reativar/renovar a validade do seu link.');
-      } else {
-        setContract(currentContract);
-        addAuditLog(contractId, 'Link Acessado', `Cliente acessou o link do contrato ${currentContract.contractNumber}. Iniciando fluxo de formalização.`);
+    const loadAndSyncContract = async () => {
+      setLoading(true);
+      try {
+        await syncWithSupabase();
+      } catch (e) {
+        console.error("Error syncing before wizard load:", e);
       }
-    } else {
-      setErrorMessage('Contrato não localizado. Solicite uma nova guia de formalização.');
-    }
+      
+      const contracts = getContracts();
+      const currentContract = contracts.find(c => c.id === contractId);
+      if (currentContract) {
+        const createdTime = new Date(currentContract.createdAt).getTime();
+        const isExpired = (Date.now() - createdTime) > 24 * 60 * 60 * 1000;
+        
+        if (isExpired && currentContract.status === 'Pendente') {
+          setErrorMessage('Este link de formalização expirou por exceder o limite de 24 horas. Por favor, entre em contato com o suporte ou operador da promotora financeira para reativar/renovar a validade do seu link.');
+          setContract(currentContract);
+        } else {
+          setContract(currentContract);
+          addAuditLog(contractId, 'Link Acessado', `Cliente acessou o link do contrato ${currentContract.contractNumber}. Iniciando fluxo de formalização.`);
+        }
+      } else {
+        setErrorMessage('Contrato não localizado. Solicite uma nova guia de formalização.');
+      }
+      setLoading(false);
+    };
+
+    loadAndSyncContract();
 
     // Try fetching public IP
     fetch('https://api.ipify.org?format=json')
@@ -411,8 +424,18 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
       const signatureDataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(virtualBadgeSvg)}`;
       
       // Save recorded video into IndexedDB
+      let videoBlobKey = undefined;
       if (recordedBlob) {
         await saveVideoBlob(contract.id, recordedBlob);
+        
+        try {
+          const supabaseKey = await uploadVideoToSupabase(contract.id, recordedBlob);
+          if (supabaseKey) {
+            videoBlobKey = supabaseKey;
+          }
+        } catch (supabaseErr) {
+          console.error("Error upload to Supabase Storage:", supabaseErr);
+        }
       }
 
       // Collect complete client metadata for judicial backup
@@ -444,6 +467,7 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
             ...c,
             status: ContractStatus.RECORDED,
             signatureImage: signatureDataUrl,
+            videoBlobKey: videoBlobKey || c.videoBlobKey,
             metadata: richMetadata,
             verifiedAt: new Date().toISOString()
           };

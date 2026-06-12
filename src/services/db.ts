@@ -404,3 +404,53 @@ export function resetDBData(): void {
   localStorage.removeItem(CONTRACTS_KEY);
   localStorage.removeItem(LOGS_KEY);
 }
+
+// Upload a video blob directly to the "videos-formalizacao" Supabase Storage bucket
+export async function uploadVideoToSupabase(contractId: string, blob: Blob): Promise<string | null> {
+  if (!supabase) return null;
+  try {
+    const fileName = `${contractId}.mp4`;
+    const { data, error } = await supabase.storage
+      .from('videos-formalizacao')
+      .upload(fileName, blob, {
+        contentType: 'video/mp4',
+        upsert: true
+      });
+      
+    if (error) {
+      console.error('Error uploading video to Supabase Storage "videos-formalizacao":', error);
+      return null;
+    }
+    
+    return fileName;
+  } catch (err) {
+    console.error('Unhandled error in uploadVideoToSupabase:', err);
+    return null;
+  }
+}
+
+// Dynamically retrieve either the local IndexedDB video URL or the public URL from Supabase Storage
+export async function retrieveVideoUrl(contractId: string): Promise<string | null> {
+  // 1. Try local cache in IndexedDB first
+  const localBlob = await getVideoBlob(contractId);
+  if (localBlob) {
+    return URL.createObjectURL(localBlob);
+  }
+  
+  // 2. Fall back to Supabase Storage "videos-formalizacao" public link
+  if (supabase) {
+    try {
+      const { data } = supabase.storage
+        .from('videos-formalizacao')
+        .getPublicUrl(`${contractId}.mp4`);
+        
+      if (data && data.publicUrl) {
+        return data.publicUrl;
+      }
+    } catch (e) {
+      console.error('Error constructing public URL from Supabase Storage:', e);
+    }
+  }
+  
+  return null;
+}

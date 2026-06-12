@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS public.contracts (
 ALTER TABLE public.contracts ENABLE ROW LEVEL SECURITY;
 
 -- Criar políticas de acesso rápido de leitura/escrita pública prontas para teste
+DROP POLICY IF EXISTS "Permitir leitura pública" ON public.contracts;
 CREATE POLICY "Permitir leitura pública" ON public.contracts FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Permitir inserção e atualização pública" ON public.contracts;
 CREATE POLICY "Permitir inserção e atualização pública" ON public.contracts FOR ALL USING (true) WITH CHECK (true);
 
 
@@ -44,7 +47,10 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 
 -- Criar políticas públicas para os logs de auditoria
+DROP POLICY IF EXISTS "Permitir leitura pública" ON public.audit_logs;
 CREATE POLICY "Permitir leitura pública" ON public.audit_logs FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Permitir inserção e atualização pública" ON public.audit_logs;
 CREATE POLICY "Permitir inserção e atualização pública" ON public.audit_logs FOR ALL USING (true) WITH CHECK (true);
 
 
