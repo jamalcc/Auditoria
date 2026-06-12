@@ -9,6 +9,7 @@ export default function App() {
   const [currentContractId, setCurrentContractId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'admin' | 'client'>('admin');
   const [user, setUser] = useState<{ email: string; id: string } | null>(null);
+  const [isDirectLink, setIsDirectLink] = useState(false);
   
   // Parse real browser search query parameters on mount to mimic Vercel routing
   useEffect(() => {
@@ -18,6 +19,7 @@ export default function App() {
     if (formalizarId) {
       setCurrentContractId(formalizarId);
       setViewMode('client');
+      setIsDirectLink(true);
     }
   }, []);
 
@@ -48,23 +50,32 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2.5">
-            {viewMode === 'admin' && user && (
-              <div className="flex items-center gap-2.5 bg-slate-800/80 px-3 py-1 rounded-xl border border-slate-700 text-xs">
-                <span className="text-slate-300 font-medium max-w-48 truncate">{user.email}</span>
-                <button
-                  type="button"
-                  onClick={handleLogout}
-                  title="Sair do painel"
-                  className="p-1 hover:bg-slate-700 text-slate-400 hover:text-white rounded-lg transition flex items-center gap-1 cursor-pointer font-bold text-[10.5px]"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  <span>Sair</span>
-                </button>
+            {viewMode === 'admin' ? (
+              <>
+                {user && (
+                  <div className="flex items-center gap-2.5 bg-slate-800/80 px-3 py-1 rounded-xl border border-slate-700 text-xs">
+                    <span className="text-slate-300 font-medium max-w-48 truncate">{user.email}</span>
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      title="Sair do painel"
+                      className="p-1 hover:bg-slate-700 text-slate-400 hover:text-white rounded-lg transition flex items-center gap-1 cursor-pointer font-bold text-[10.5px]"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>Sair</span>
+                    </button>
+                  </div>
+                )}
+                <span className="text-indigo-400 font-mono text-[10px] bg-indigo-500/10 px-2 py-0.5 rounded-full border border-indigo-500/20">
+                  ● ADMIN PORTAL
+                </span>
+              </>
+            ) : (
+              <div className="flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono">
+                <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse mr-1" />
+                CONEXÃO CRIPTOGRAFADA SSL
               </div>
             )}
-            <span className="text-indigo-400 font-mono text-[10px] bg-indigo-500/10 px-2 py-0.5 rounded-full border border-indigo-500/20">
-              ● ADMIN PORTAL
-            </span>
           </div>
         </div>
       </header>
@@ -89,8 +100,8 @@ export default function App() {
             {currentContractId ? (
               <ClientWizard 
                 contractId={currentContractId}
-                onBackToAdmin={() => setViewMode('admin')}
-                onComplete={() => {
+                onBackToAdmin={isDirectLink ? undefined : () => setViewMode('admin')}
+                onComplete={isDirectLink ? undefined : () => {
                   setViewMode('admin');
                   // Quick cleanup URL parameter
                   window.history.pushState({}, '', window.location.pathname);
