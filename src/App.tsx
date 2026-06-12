@@ -11,7 +11,7 @@ export default function App() {
   const [user, setUser] = useState<{ email: string; id: string } | null>(null);
   const [isDirectLink, setIsDirectLink] = useState(false);
   
-  // Parse real browser search query parameters on mount to mimic Vercel routing
+  // Parse real browser search query parameters on mount to mimic Netlify routing
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const formalizarId = params.get('formalizar');

@@ -158,7 +158,7 @@ export default function SupabaseAuth({ onAuthSuccess }: SupabaseAuthProps) {
             <span>MODO DE TESTE LOCAL PRONTO</span>
           </div>
           <p className="leading-relaxed">
-            Inicie no modo demonstrativo ou com qualquer e-mail para pré-visualizar. Para uso em produção no Vercel, basta adicionar as variáveis <code className="bg-slate-100 px-1 py-0.5 rounded text-mono font-bold">VITE_SUPABASE_URL</code> e <code className="bg-slate-100 px-1 py-0.5 rounded text-mono font-bold">VITE_SUPABASE_ANON_KEY</code>.
+            Inicie no modo demonstrativo ou com qualquer e-mail para pré-visualizar. Para uso em produção no Netlify, basta adicionar as variáveis <code className="bg-slate-100 px-1 py-0.5 rounded text-mono font-bold">VITE_SUPABASE_URL</code> e <code className="bg-slate-100 px-1 py-0.5 rounded text-mono font-bold">VITE_SUPABASE_ANON_KEY</code> nas configurações de variáveis de ambiente do seu dashboard do Netlify.
           </p>
         </div>
       )}
