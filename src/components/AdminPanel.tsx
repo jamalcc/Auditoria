@@ -107,11 +107,23 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
 
     // Auto-refresh/poll contracts from localStorage (and Supabase) every 4 seconds softly
     const interval = setInterval(() => {
-      setContracts(getContracts());
+      const freshContracts = getContracts();
+      setContracts((prev) => {
+        if (JSON.stringify(prev) !== JSON.stringify(freshContracts)) {
+          return freshContracts;
+        }
+        return prev;
+      });
+
       if (supabase) {
         syncWithSupabase().then((result) => {
-          if (result) {
-            setContracts(result.contracts);
+          if (result && result.contracts) {
+            setContracts((prev) => {
+              if (JSON.stringify(prev) !== JSON.stringify(result.contracts)) {
+                return result.contracts;
+              }
+              return prev;
+            });
           }
         });
       }
@@ -120,7 +132,13 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
     // Immediately capture state updates across multiple browser tabs
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'promotora_contracts' || e.key === 'promotora_logs') {
-        setContracts(getContracts());
+        const freshContracts = getContracts();
+        setContracts((prev) => {
+          if (JSON.stringify(prev) !== JSON.stringify(freshContracts)) {
+            return freshContracts;
+          }
+          return prev;
+        });
       }
     };
     window.addEventListener('storage', handleStorageChange);
