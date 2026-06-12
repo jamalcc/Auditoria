@@ -1,4 +1,4 @@
-import { Shield, MapPin, Globe, Cpu, CheckSquare, Calendar, User, FileText, Smartphone } from 'lucide-react';
+import { Shield, MapPin, Globe, Cpu, CheckSquare, Calendar, User, FileText, Smartphone, Printer } from 'lucide-react';
 import { Contract, AuditLog } from '../types';
 
 interface LegalReportProps {
@@ -24,8 +24,14 @@ export default function LegalReport({ contract, auditLogs, onClose }: LegalRepor
         </div>
         <div className="flex gap-2">
           <button
+            onClick={() => window.print()}
+            className="px-4 py-2 bg-teal-600 text-white rounded-lg text-xs font-semibold hover:bg-teal-700 transition shadow-sm flex items-center gap-1.5 cursor-pointer"
+          >
+            <Printer className="w-3.5 h-3.5" /> Imprimir / PDF
+          </button>
+          <button
             onClick={onClose}
-            className="px-4 py-2 bg-slate-900 text-white rounded-lg text-xs font-semibold hover:bg-slate-800 transition shadow-sm"
+            className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold transition shadow-sm cursor-pointer"
           >
             Fechar Relatório
           </button>

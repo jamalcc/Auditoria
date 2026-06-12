@@ -35,6 +35,12 @@ function validateCPF(cpf: string): boolean {
   return true;
 }
 
+export const isContractExpired = (contract: Contract) => {
+  if (contract.status !== ContractStatus.PENDING) return false;
+  const createdTime = new Date(contract.createdAt).getTime();
+  return (Date.now() - createdTime) > 24 * 60 * 60 * 1000;
+};
+
 interface AdminPanelProps {
   onSelectContractForWizard: (id: string) => void;
 }
@@ -98,6 +104,31 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
     if (supabase) {
       syncDatabase();
     }
+
+    // Auto-refresh/poll contracts from localStorage (and Supabase) every 4 seconds softly
+    const interval = setInterval(() => {
+      setContracts(getContracts());
+      if (supabase) {
+        syncWithSupabase().then((result) => {
+          if (result) {
+            setContracts(result.contracts);
+          }
+        });
+      }
+    }, 4000);
+
+    // Immediately capture state updates across multiple browser tabs
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'promotora_contracts' || e.key === 'promotora_logs') {
+        setContracts(getContracts());
+      }
+    };
+    window.addEventListener('storage', handleStorageChange);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('storage', handleStorageChange);
+    };
   }, []);
 
   // Fetch and manage recorded video blob object url on contract selection
@@ -225,6 +256,46 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
     setShowRejectPanel(false);
     setRejectionReasonInput('');
     setDetailActiveTab('details');
+  };
+
+  // Synchronize sidebar selectedContract details if background poll receives new updates
+  useEffect(() => {
+    if (selectedContract) {
+      const fresh = contracts.find(c => c.id === selectedContract.id);
+      if (fresh) {
+        if (
+          fresh.status !== selectedContract.status || 
+          fresh.createdAt !== selectedContract.createdAt || 
+          fresh.signatureImage !== selectedContract.signatureImage ||
+          fresh.rejectionReason !== selectedContract.rejectionReason
+        ) {
+          setSelectedContract(fresh);
+          setSelectedLogs(getAuditLogs(fresh.id));
+        }
+      }
+    }
+  }, [contracts, selectedContract]);
+
+  // Renew link expiration capability
+  const handleRenewLink = (id: string) => {
+    const updated = contracts.map(c => {
+      if (c.id === id) {
+        return {
+          ...c,
+          createdAt: new Date().toISOString()
+        };
+      }
+      return c;
+    });
+    saveContracts(updated);
+    addAuditLog(id, 'Link Renovado', 'O administrador renovou a validade do link de formalização de proposta por mais 24 horas.');
+    setContracts(updated);
+    
+    const fresh = updated.find(c => c.id === id);
+    if (fresh) {
+      setSelectedContract(fresh);
+      setSelectedLogs(getAuditLogs(fresh.id));
+    }
   };
 
   // Status changing logic
@@ -557,25 +628,32 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                         <div className="text-[10px] text-slate-400">{contract.installmentsCount} parcelas de {formatBRL(contract.installmentValue)}</div>
                       </td>
                       <td className="p-4 text-center">
-                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
-                          contract.status === ContractStatus.APPROVED 
-                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
-                            : contract.status === ContractStatus.REJECTED 
-                            ? 'bg-rose-50 text-rose-700 border-rose-200' 
-                            : contract.status === ContractStatus.RECORDED 
-                            ? 'bg-indigo-50 text-indigo-700 border-indigo-205 border-indigo-200' 
-                            : 'bg-amber-50 text-amber-700 border-amber-205 border-amber-200'
-                        }`}>
-                          <div className={`w-1.5 h-1.5 rounded-full ${
-                            contract.status === ContractStatus.APPROVED ? 'bg-emerald-500' :
-                            contract.status === ContractStatus.REJECTED ? 'bg-rose-500' :
-                            contract.status === ContractStatus.RECORDED ? 'bg-indigo-500 animate-pulse' : 'bg-amber-500'
-                          }`} />
-                          {contract.status === ContractStatus.APPROVED ? 'Validado' :
-                           contract.status === ContractStatus.RECORDED ? 'Vídeo Enviado' :
-                           contract.status === ContractStatus.PENDING ? 'Pendente' :
-                           contract.status === ContractStatus.REJECTED ? 'Reprovado' : contract.status}
-                        </span>
+                        {isContractExpired(contract) ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-rose-50 text-rose-700 border-rose-200">
+                            <Clock className="w-3 h-3 text-rose-500" />
+                            Expirado (24h)
+                          </span>
+                        ) : (
+                          <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
+                            contract.status === ContractStatus.APPROVED 
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                              : contract.status === ContractStatus.REJECTED 
+                              ? 'bg-rose-50 text-rose-700 border-rose-200' 
+                              : contract.status === ContractStatus.RECORDED 
+                              ? 'bg-indigo-50 text-indigo-700 border-indigo-200' 
+                              : 'bg-amber-50 text-amber-700 border-amber-200'
+                          }`}>
+                            <div className={`w-1.5 h-1.5 rounded-full ${
+                              contract.status === ContractStatus.APPROVED ? 'bg-emerald-500' :
+                              contract.status === ContractStatus.REJECTED ? 'bg-rose-500' :
+                              contract.status === ContractStatus.RECORDED ? 'bg-indigo-500 animate-pulse' : 'bg-amber-500'
+                            }`} />
+                            {contract.status === ContractStatus.APPROVED ? 'Validado' :
+                             contract.status === ContractStatus.RECORDED ? 'Vídeo Enviado' :
+                             contract.status === ContractStatus.PENDING ? 'Pendente' :
+                             contract.status === ContractStatus.REJECTED ? 'Reprovado' : contract.status}
+                          </span>
+                        )}
                       </td>
                       <td className="p-4 text-right" onClick={(e) => e.stopPropagation()}>
                         <div className="flex justify-end gap-1.5">
@@ -808,16 +886,72 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                       )}
                     </div>
                   ) : (
-                    <div className="p-3 bg-amber-50/40 border border-amber-100 rounded-xl text-[11px] text-slate-600 text-center space-y-2">
+                    <div className="p-3 bg-amber-50/40 border border-amber-100 rounded-xl text-[11px] text-slate-600 text-center space-y-3">
                       <p>Este cliente ainda não iniciou a validação técnica de conformidade.</p>
-                      <p className="font-medium text-emerald-700">Copie o link seguro e repasse ao cliente para que ele faça a gravação eletrônica.</p>
+                      <p className="font-medium text-slate-700">Copie o link seguro de envio e envie ao cliente para que ele possa realizar a assinatura digital e gravação da biometria:</p>
                       
-                      <button
-                        onClick={() => handleCopyShareLink(selectedContract)}
-                        className="mx-auto block px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-bold text-[10.5px] transition cursor-pointer"
-                      >
-                        {copiedId === selectedContract.id ? '✓ Link Copiado!' : '🔗 Copiar Link de Envio'}
-                      </button>
+                      {isContractExpired(selectedContract) ? (
+                        <div className="p-2.5 border border-rose-200 bg-rose-50 text-rose-800 rounded-lg text-[10.5px] space-y-2 mb-1">
+                          <p className="font-bold flex items-center justify-center gap-1">
+                            <Clock className="w-3.5 h-3.5 text-rose-600" /> Link Expirado! (Criado há +24h)
+                          </p>
+                          <p className="text-[10px] text-slate-500">O cliente receberá uma mensagem de erro informando que o link expirou ao tentar acessá-lo.</p>
+                          <button
+                            onClick={() => handleRenewLink(selectedContract.id)}
+                            className="w-full py-1.5 px-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[10.5px] font-bold transition flex items-center justify-center gap-1 cursor-pointer shadow-xs"
+                          >
+                            <RefreshCw className="w-3 h-3 animate-spin-once" /> Reativar Link (Mais 24 horas vago)
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="p-2 border border-emerald-100 bg-emerald-50 text-emerald-800 rounded-lg text-[10px]">
+                          <p className="font-bold flex items-center justify-center gap-1 text-emerald-700">
+                            ✓ Link Seguro Válido e Ativo
+                          </p>
+                          <p className="text-slate-500 mt-0.5">Válido até: {new Date(new Date(selectedContract.createdAt).getTime() + 24 * 60 * 60 * 1000).toLocaleString('pt-BR')}</p>
+                        </div>
+                      )}
+
+                      {/* Professional Shareable link input field copy widget */}
+                      <div className="space-y-1.5 rounded-lg bg-white p-2 border border-slate-200 text-left">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">URL de Formalização</span>
+                        <div className="flex gap-1">
+                          <input
+                            type="text"
+                            readOnly
+                            onClick={(e) => {
+                              (e.target as HTMLInputElement).select();
+                              handleCopyShareLink(selectedContract);
+                            }}
+                            value={`${window.location.origin}${window.location.pathname}?formalizar=${selectedContract.id}`}
+                            className="bg-slate-50 border border-slate-100 rounded-lg py-1 px-2 text-[10px] text-slate-600 truncate flex-1 select-all cursor-pointer font-mono h-7"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleCopyShareLink(selectedContract)}
+                            className={`px-2.5 py-1 text-[10px] font-bold rounded-lg transition shadow-xs flex items-center gap-1 shrink-0 h-7 ${
+                              copiedId === selectedContract.id 
+                                ? 'bg-emerald-600 text-white animate-pulse' 
+                                : 'bg-slate-900 hover:bg-slate-800 text-white'
+                            }`}
+                          >
+                            {copiedId === selectedContract.id ? (
+                              <Check className="w-3 h-3 text-white" />
+                            ) : (
+                              <Copy className="w-3 h-3 text-white" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {!isContractExpired(selectedContract) && (
+                        <button
+                          onClick={() => handleRenewLink(selectedContract.id)}
+                          className="text-[10px] text-zinc-500 hover:text-indigo-600 hover:underline flex items-center justify-center gap-1 mx-auto mt-1 font-medium transition cursor-pointer"
+                        >
+                          <RefreshCw className="w-3 h-3 text-zinc-400 hover:text-indigo-600" /> Atualizar / Estender validade (+24h)
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -926,13 +1060,34 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                     required
                     value={newClientCpf}
                     onChange={(e) => {
-                      let val = e.target.value.replace(/\D/g, '');
-                      if (val.length > 11) val = val.substring(0, 11);
-                      setNewClientCpf(val);
+                      const cleanValue = e.target.value.replace(/\D/g, '');
+                      if (cleanValue.length <= 11) {
+                        let formatted = cleanValue;
+                        if (cleanValue.length > 3 && cleanValue.length <= 6) {
+                          formatted = `${cleanValue.substring(0, 3)}.${cleanValue.substring(3)}`;
+                        } else if (cleanValue.length > 6 && cleanValue.length <= 9) {
+                          formatted = `${cleanValue.substring(0, 3)}.${cleanValue.substring(3, 6)}.${cleanValue.substring(6)}`;
+                        } else if (cleanValue.length > 9) {
+                          formatted = `${cleanValue.substring(0, 3)}.${cleanValue.substring(3, 6)}.${cleanValue.substring(6, 9)}-${cleanValue.substring(9, 11)}`;
+                        }
+                        setNewClientCpf(formatted);
+                      }
                     }}
-                    placeholder="Apenas números (Ex: 12345678901)"
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-hidden focus:border-primary-500"
+                    placeholder="000.000.000-00"
+                    maxLength={14}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-hidden focus:border-primary-500 font-mono font-semibold"
                   />
+                  {newClientCpf && (
+                    <div className="mt-1 text-[10px] font-medium">
+                      {newClientCpf.replace(/\D/g, '').length < 11 ? (
+                        <span className="text-slate-400">Digitando... (Faltam {11 - newClientCpf.replace(/\D/g, '').length} dígitos)</span>
+                      ) : validateCPF(newClientCpf.replace(/\D/g, '')) ? (
+                        <span className="text-emerald-500 font-semibold flex items-center gap-0.5">✓ CPF válido para operação</span>
+                      ) : (
+                        <span className="text-rose-500 font-semibold flex items-center gap-0.5">✗ Dígitos verificadores do CPF inválidos</span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <div>

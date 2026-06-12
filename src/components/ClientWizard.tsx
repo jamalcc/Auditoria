@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Camera, Mic, MapPin, AlertCircle, RefreshCw, CheckCircle, Video, Check, Square, Shield, Eye, PenTool } from 'lucide-react';
+import { Camera, Mic, MapPin, AlertCircle, RefreshCw, CheckCircle, Video, Check, Square, Shield, Eye, PenTool, Clock } from 'lucide-react';
 import { Contract, ContractStatus, ClientMetadata } from '../types';
 import { saveVideoBlob, addAuditLog, saveContracts, getContracts } from '../services/db';
 
@@ -28,6 +28,18 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
   // Webcam & Media Recorder State
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
   const videoPlaybackRef = useRef<HTMLVideoElement | null>(null);
+  
+  const setVideoPreviewRef = (el: HTMLVideoElement | null) => {
+    videoPreviewRef.current = el;
+    if (el && mediaStream) {
+      try {
+        el.srcObject = mediaStream;
+      } catch (err) {
+        console.warn('Erro ao associar stream ao elemento de video', err);
+      }
+    }
+  };
+
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
   const [recordedChunks, setRecordedChunks] = useState<Blob[]>([]);
@@ -43,14 +55,57 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [hasSigned, setHasSigned] = useState(false);
+  
+  const [timeLeftStr, setTimeLeftStr] = useState('');
+
+  // Live link expiration countdown timer
+  useEffect(() => {
+    if (!contract || contract.status !== 'Pendente') {
+      setTimeLeftStr('');
+      return;
+    }
+
+    const calculateTimeLeft = () => {
+      const createdTime = new Date(contract.createdAt).getTime();
+      const endTime = createdTime + 24 * 60 * 60 * 1000;
+      const remains = endTime - Date.now();
+
+      if (remains <= 0) {
+        setTimeLeftStr('EXPIRADO');
+        setErrorMessage('Este link de formalização expirou por exceder o limite de 24 horas. Por favor, entre em contato com o suporte ou operador da promotora financeira para reativar/renovar a validade do seu link.');
+      } else {
+        const hours = Math.floor(remains / (1000 * 60 * 60));
+        const minutes = Math.floor((remains % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((remains % (1000 * 60)) / 1000);
+        
+        let formatted = '';
+        if (hours > 0) {
+          formatted += `${hours}h `;
+        }
+        formatted += `${minutes}m ${seconds}s`;
+        setTimeLeftStr(formatted);
+      }
+    };
+
+    calculateTimeLeft();
+    const timer = setInterval(calculateTimeLeft, 1000);
+    return () => clearInterval(timer);
+  }, [contract]);
 
   // Load contract details and user IP
   useEffect(() => {
     const contracts = getContracts();
     const currentContract = contracts.find(c => c.id === contractId);
     if (currentContract) {
-      setContract(currentContract);
-      addAuditLog(contractId, 'Link Acessado', `Cliente acessou o link do contrato ${currentContract.contractNumber}. Iniciando fluxo de formalização.`);
+      const createdTime = new Date(currentContract.createdAt).getTime();
+      const isExpired = (Date.now() - createdTime) > 24 * 60 * 60 * 1000;
+      
+      if (isExpired && currentContract.status === 'Pendente') {
+        setErrorMessage('Este link de formalização expirou por exceder o limite de 24 horas. Por favor, entre em contato com o suporte ou operador da promotora financeira para reativar/renovar a validade do seu link.');
+      } else {
+        setContract(currentContract);
+        addAuditLog(contractId, 'Link Acessado', `Cliente acessou o link do contrato ${currentContract.contractNumber}. Iniciando fluxo de formalização.`);
+      }
     } else {
       setErrorMessage('Contrato não localizado. Solicite uma nova guia de formalização.');
     }
@@ -487,9 +542,29 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
           <div className="p-5 md:p-8" id="client-unified-panel">
             
             {/* Header message */}
-            <div className="mb-6">
-              <h1 className="text-lg md:text-xl font-display font-bold text-slate-800">Confirmação Digital de Proposta</h1>
-              <p className="text-xs text-slate-500">Leia os dados contratuais e grave um curto vídeo lendo o roteiro de declaração abaixo.</p>
+            <div className="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+              <div>
+                <h1 className="text-xs font-semibold tracking-wider text-teal-700 uppercase mb-0.5">Ambiente Seguro do Cliente</h1>
+                <h2 className="text-lg md:text-xl font-display font-bold text-slate-800">Confirmação Digital de Proposta</h2>
+                <p className="text-xs text-slate-500">Leia os dados contratuais e grave um curto vídeo lendo o roteiro de declaração abaixo.</p>
+              </div>
+              
+              {/* Live Expiration Countdown Timer (Melhoria 2) */}
+              {timeLeftStr && (
+                <div className={`shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-xl border font-mono text-[11.5px] font-bold shadow-xs ${
+                  timeLeftStr === 'EXPIRADO' 
+                    ? 'bg-rose-50 text-rose-700 border-rose-200' 
+                    : timeLeftStr.includes('0h') || !timeLeftStr.includes('h')
+                    ? 'bg-amber-50 text-amber-600 border-amber-200 animate-pulse'
+                    : 'bg-emerald-50 text-emerald-700 border-emerald-100'
+                }`}>
+                  <Clock className={`w-4 h-4 shrink-0 ${timeLeftStr === 'EXPIRADO' ? 'text-rose-500' : 'text-emerald-500 animate-spin-once'}`} />
+                  <div className="flex flex-col leading-none text-left">
+                    <span className="text-[8px] uppercase tracking-wide font-sans text-slate-400 font-bold mb-0.5">Expiração do Link</span>
+                    <span className="tracking-tight text-xs font-bold">{timeLeftStr === 'EXPIRADO' ? 'EXPIRADO' : timeLeftStr}</span>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Error alerts */}
@@ -601,7 +676,7 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
                       /* Currently recording */
                       mediaStream ? (
                         <video
-                          ref={videoPreviewRef}
+                          ref={setVideoPreviewRef}
                           autoPlay
                           playsInline
                           muted
@@ -618,7 +693,7 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
                       /* Standard standby camera */
                       mediaStream ? (
                         <video
-                          ref={videoPreviewRef}
+                          ref={setVideoPreviewRef}
                           autoPlay
                           playsInline
                           muted
