@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { ShieldCheck, LogOut, HelpCircle as Help } from 'lucide-react';
+import { ShieldCheck, LogOut, HelpCircle as Help, Moon, Sun } from 'lucide-react';
 import AdminPanel from './components/AdminPanel';
 import ClientWizard from './components/ClientWizard';
 import SupabaseAuth from './components/SupabaseAuth';
@@ -10,9 +10,26 @@ export default function App() {
   const [viewMode, setViewMode] = useState<'admin' | 'client'>('admin');
   const [user, setUser] = useState<{ email: string; id: string } | null>(null);
   const [isDirectLink, setIsDirectLink] = useState(false);
-  
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+      if (typeof window !== 'undefined') {
+          return localStorage.getItem('theme') === 'dark';
+      }
+      return false;
+  });
+
+  useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('theme', 'dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('theme', 'light');
+    }
+  }, [isDarkMode]);
+
   // Parse real browser search query parameters on mount to mimic Netlify routing
   useEffect(() => {
+
     const params = new URLSearchParams(window.location.search);
     const formalizarId = params.get('formalizar');
     
@@ -32,10 +49,10 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col font-sans antialiased">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-900 flex flex-col font-sans antialiased transition-colors duration-300">
       
       {/* Visual Header Banner for Platform Branding */}
-      <header className="bg-slate-900 text-white shadow-md border-b border-slate-800 shrink-0 select-none">
+      <header className="bg-slate-900 dark:bg-slate-950 text-white shadow-md border-b border-slate-800 shrink-0 select-none transition-colors duration-300">
         <div className="max-w-7xl mx-auto px-4 py-3 flex flex-col sm:flex-row justify-between items-center gap-3">
           
           <div className="flex items-center gap-2.5">
@@ -50,6 +67,13 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2.5">
+            <button
+               onClick={() => setIsDarkMode(!isDarkMode)}
+               title="Alternar Tema"
+               className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg transition cursor-pointer flex items-center justify-center mr-2"
+            >
+              {isDarkMode ? <Sun className="w-4.5 h-4.5" /> : <Moon className="w-4.5 h-4.5" />}
+            </button>
             {viewMode === 'admin' ? (
               <>
                 {user && (
@@ -108,10 +132,10 @@ export default function App() {
                 }}
               />
             ) : (
-              <div className="bg-white rounded-2xl p-8 border border-slate-100 text-center max-w-md mx-auto my-12">
+              <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-2xl p-8 border border-slate-100 text-center max-w-md mx-auto my-12">
                 <Help className="w-12 h-12 text-slate-400 mx-auto mb-3" />
-                <h3 className="font-display font-medium text-slate-800 text-sm">Selecione um Contrato Primero</h3>
-                <p className="text-xs text-slate-500 mt-1 mb-5">Vá ao Painel Adminstrativo, crie ou selecione uma proposta e clique no botão de Link de Formalização para fazer este teste.</p>
+                <h3 className="font-display font-medium text-slate-800 dark:text-white text-sm">Selecione um Contrato Primero</h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 mb-5">Vá ao Painel Adminstrativo, crie ou selecione uma proposta e clique no botão de Link de Formalização para fazer este teste.</p>
                 <button
                   onClick={() => setViewMode('admin')}
                   className="px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-semibold"
@@ -125,7 +149,7 @@ export default function App() {
       </main>
 
       {/* Corporate compliant simple status footer */}
-      <footer className="no-print bg-white border-t border-slate-100 py-4 text-center text-[10.5px] text-slate-400 shrink-0 font-sans">
+      <footer className="no-print bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 border-t border-slate-100 py-4 text-center text-[10.5px] text-slate-400 shrink-0 font-sans">
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row justify-between items-center gap-2">
           <p>© 2026 EnvioLink. Todos os direitos reservados.</p>
           <div className="flex items-center gap-3 font-mono text-[9px]">

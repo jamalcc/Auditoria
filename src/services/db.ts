@@ -269,16 +269,18 @@ export function getContracts(): Contract[] {
 // Save all contracts
 export function saveContracts(contracts: Contract[]): void {
   localStorage.setItem(CONTRACTS_KEY, JSON.stringify(contracts));
-  
-  // Asynchronous background upload to Supabase when variable is configured
-  if (supabase) {
-    const dbContracts = contracts.map(mapToDbContract);
-    supabase.from('contracts').upsert(dbContracts).then(({ error }) => {
-      if (error) {
-        console.error('Error syncing contracts to Supabase:', error);
-      }
-    });
+}
+
+// Function to explicitly push a single contract to Supabase
+export async function pushContractToDB(contract: Contract): Promise<boolean> {
+  if (!supabase) return false;
+  const dbContract = mapToDbContract(contract);
+  const { error } = await supabase.from('contracts').upsert([dbContract]);
+  if (error) {
+    console.error('Error pushing contract to Supabase:', error);
+    return false;
   }
+  return true;
 }
 
 // Add positive action audit log
@@ -292,23 +294,24 @@ export function addAuditLog(contractId: string, action: string, description: str
     description
   };
   localStorage.setItem(LOGS_KEY, JSON.stringify([newLog, ...logs]));
-  
-  // Asynchronous background insert into Supabase
-  if (supabase) {
-    supabase.from('audit_logs').insert({
-      id: newLog.id,
-      contract_id: newLog.contractId,
-      action: newLog.action,
-      timestamp: newLog.timestamp,
-      description: newLog.description
-    }).then(({ error }) => {
-      if (error) {
-        console.error('Error syncing audit log to Supabase:', error);
-      }
-    });
-  }
-  
   return newLog;
+}
+
+// Function to explicitly push a single log to Supabase
+export async function pushLogToDB(log: AuditLog): Promise<boolean> {
+  if (!supabase) return false;
+  const { error } = await supabase.from('audit_logs').upsert([{
+    id: log.id,
+    contract_id: log.contractId,
+    action: log.action,
+    timestamp: log.timestamp,
+    description: log.description
+  }]);
+  if (error) {
+    console.error('Error logging to Supabase:', error);
+    return false;
+  }
+  return true;
 }
 
 // Get audit logs
@@ -557,3 +560,72 @@ export async function retrieveVideoUrl(contractId: string): Promise<string | nul
   
   return null;
 }
+
+// Generates a fully self-contained shareable URL in case database/localStorage mismatch occurs (e.g. sharing across devices without Supabase).
+export function generateShareLink(contract: Contract): string {
+  const baseUrl = window.location.origin + window.location.pathname;
+  const payload = {
+    id: contract.id,
+    num: contract.contractNumber,
+    name: contract.clientName,
+    cpf: contract.clientCpf,
+    bank: contract.bankName,
+    val: contract.releasedValue,
+    instVal: contract.installmentValue,
+    instCnt: contract.installmentsCount,
+    date: contract.createdAt,
+    status: contract.status
+  };
+  
+  try {
+    const jsonStr = JSON.stringify(payload);
+    const encodedPayload = btoa(unescape(encodeURIComponent(jsonStr)));
+    return `${baseUrl}?formalizar=${contract.id}&payload=${encodedPayload}`;
+  } catch (e) {
+    console.error('Error encoding contract payload for link:', e);
+    return `${baseUrl}?formalizar=${contract.id}`;
+  }
+}
+
+// Attempts to reconstruct a missing contract on the client device if it is passed as a robust self-contained URL parameter.
+export function reconstructContractFromUrl(contractId: string): Contract | null {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const payloadParam = params.get('payload');
+    if (!payloadParam) return null;
+
+    const jsonStr = decodeURIComponent(escape(atob(payloadParam)));
+    const data = JSON.parse(jsonStr);
+
+    if (data.id === contractId) {
+      const reconstructed: Contract = {
+        id: data.id,
+        contractNumber: data.num,
+        clientName: data.name,
+        clientCpf: data.cpf,
+        bankName: data.bank,
+        releasedValue: Number(data.val),
+        installmentValue: Number(data.instVal),
+        installmentsCount: Number(data.instCnt),
+        createdAt: data.date,
+        status: data.status || ContractStatus.PENDING
+      };
+
+      const localContracts = getContracts();
+      const exists = localContracts.some(c => c.id === contractId);
+      if (!exists) {
+        saveContracts([reconstructed, ...localContracts]);
+        addAuditLog(contractId, 'Proposta Restaurada Auto', 'Contrato restaurado automaticamente de forma segura via link auto-contido.');
+        if (supabase) {
+          pushContractToDB(reconstructed).catch(err => console.error('Error auto-syncing reconstructed contract:', err));
+        }
+      }
+
+      return reconstructed;
+    }
+  } catch (err) {
+    console.error('Error reconstructing contract from URL parameter payload:', err);
+  }
+  return null;
+}
+

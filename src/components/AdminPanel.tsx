@@ -5,7 +5,7 @@ import {
   Trash2, Landmark, Check, HelpCircle, FileSpreadsheet, Eye, History, Clock
 } from 'lucide-react';
 import { Contract, ContractStatus, AuditLog } from '../types';
-import { getContracts, saveContracts, addAuditLog, getAuditLogs, resetDBData, supabase, syncWithSupabase, retrieveVideoUrl, deleteContract } from '../services/db';
+import { getContracts, saveContracts, addAuditLog, getAuditLogs, resetDBData, supabase, syncWithSupabase, retrieveVideoUrl, deleteContract, pushContractToDB, pushLogToDB, generateShareLink } from '../services/db';
 import LegalReport from './LegalReport';
 
 // Robust Brazilian CPF Validator function
@@ -75,6 +75,10 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
   const [showRejectPanel, setShowRejectPanel] = useState(false);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
 
+  // Link generation modal state
+  const [showCreatedLinkModal, setShowCreatedLinkModal] = useState(false);
+  const [createdLinkUrl, setCreatedLinkUrl] = useState('');
+  
   // Clipboard feedback snackbar
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -210,7 +214,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
   }, [newReleasedValue, newInstallmentsCount, userHasEditedInstallment]);
 
   // Handle contract generation
-  const handleCreateContract = (e: React.FormEvent) => {
+  const handleCreateContract = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newClientName || !newClientCpf || !newContractNumber || !newReleasedValue) {
       setErrorMessage('Por favor, preencha todos os campos obrigatórios (Nome, CPF, Número do Contrato e Valor).');
@@ -245,10 +249,19 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
 
     const updatedContracts = [newContract, ...contracts];
     saveContracts(updatedContracts);
-    addAuditLog(randId, 'Contrato Criado', `Proposta inserida manualmente no painel de controle de crédito. Contrato No: ${newContract.contractNumber}.`);
+    const newLog = addAuditLog(randId, 'Contrato Criado', `Proposta inserida manualmente no painel de controle de crédito. Contrato No: ${newContract.contractNumber}.`);
+
+    // Explicitly push newly created elements upstream so mobile browser fetches reliably
+    await pushContractToDB(newContract);
+    await pushLogToDB(newLog);
 
     setContracts(updatedContracts);
     setShowCreateModal(false);
+    
+    // Auto-generate fresh unique URL parameter token
+    const generatedUrl = generateShareLink(newContract);
+    setCreatedLinkUrl(generatedUrl);
+    setShowCreatedLinkModal(true);
     
     // Clear state
     setNewClientName('');
@@ -297,29 +310,42 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
   }, [contracts, selectedContract]);
 
   // Renew link expiration capability
-  const handleRenewLink = (id: string) => {
-    const updated = contracts.map(c => {
-      if (c.id === id) {
-        return {
-          ...c,
-          status: ContractStatus.PENDING,
-          createdAt: new Date().toISOString(),
-          rejectionReason: undefined,
-          videoBlobKey: undefined,
-          signatureImage: undefined
-        };
-      }
-      return c;
-    });
-    saveContracts(updated);
-    addAuditLog(id, 'Link Renovado', 'O administrador renovou a validade do link de formalização de proposta por mais 24 horas.');
-    setContracts(updated);
+  const handleRenewLink = async (oldContractId: string) => {
+    // Generate an entirely fresh ID so there are no cached local issues or browser collisions
+    const freshId = 'ctr_' + Math.random().toString(36).substring(2, 9);
     
-    const fresh = updated.find(c => c.id === id);
-    if (fresh) {
-      setSelectedContract(fresh);
-      setSelectedLogs(getAuditLogs(fresh.id));
-    }
+    const targetContract = contracts.find(c => c.id === oldContractId);
+    if (!targetContract) return;
+
+    const renewedContract = {
+      ...targetContract,
+      id: freshId,     // Generate brand new ID for pure fresh url access!
+      status: ContractStatus.PENDING,
+      createdAt: new Date().toISOString(),
+      rejectionReason: undefined,
+      videoBlobKey: undefined,
+      signatureImage: undefined
+    };
+
+    // Remove old, add renewed
+    const updated = [renewedContract, ...contracts.filter(c => c.id !== oldContractId)];
+    saveContracts(updated);
+    addAuditLog(freshId, 'Contrato Clonado/Renovado', `A proposta foi duplicada para renovar seu escopo por mais 24H. (Ref. Antiga: ${oldContractId})`);
+    
+    await pushContractToDB(renewedContract);
+    // Delete the old one locally and globally entirely!
+    await deleteContract(oldContractId);
+
+    setContracts(getContracts());
+    
+    // Automatically switch selection to newly generated token
+    setSelectedContract(renewedContract);
+    setSelectedLogs(getAuditLogs(freshId));
+    
+    // Pop up modal displaying the newly generated link immediately
+    const generatedUrl = generateShareLink(renewedContract);
+    setCreatedLinkUrl(generatedUrl);
+    setShowCreatedLinkModal(true);
   };
 
   // Status changing logic
@@ -370,9 +396,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
 
   // Copying the direct contract link to clipboard
   const handleCopyShareLink = (contract: Contract) => {
-    // Build simulated external absolute link based on environmental url or hostname
-    const baseUrl = window.location.origin + window.location.pathname;
-    const shareUrl = `${baseUrl}?formalizar=${contract.id}`;
+    const shareUrl = generateShareLink(contract);
 
     navigator.clipboard.writeText(shareUrl)
       .then(() => {
@@ -463,37 +487,37 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
       {/* 1. Statistics Summary Cards Grid (Bento style) */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         
-        <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-xs flex items-center gap-3">
+        <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 p-4 rounded-2xl border border-slate-100 shadow-xs flex items-center gap-3">
           <div className="p-3 bg-teal-50 text-teal-600 rounded-xl">
             <Landmark className="w-5 h-5" />
           </div>
           <div>
             <span className="text-[11px] text-slate-400 block font-medium">Contratos Totais</span>
-            <span className="text-xl font-display font-bold text-slate-800">{totalCreated}</span>
+            <span className="text-xl font-display font-bold text-slate-800 dark:text-white">{totalCreated}</span>
           </div>
         </div>
 
-        <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-xs flex items-center gap-3">
+        <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 p-4 rounded-2xl border border-slate-100 shadow-xs flex items-center gap-3">
           <div className="p-3 bg-indigo-50 text-indigo-600 rounded-xl relative">
             <Play className="w-5 h-5" /><div className="absolute top-1 right-1 w-2.5 h-2.5 bg-indigo-500 rounded-full animate-ping" />
           </div>
           <div>
             <span className="text-[11px] text-slate-400 block font-medium">Aguardando Auditoria</span>
-            <span className="text-xl font-display font-bold text-slate-800">{awaitingReview}</span>
+            <span className="text-xl font-display font-bold text-slate-800 dark:text-white">{awaitingReview}</span>
           </div>
         </div>
 
-        <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-xs flex items-center gap-3">
+        <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 p-4 rounded-2xl border border-slate-100 shadow-xs flex items-center gap-3">
           <div className="p-3 bg-amber-50 text-amber-600 rounded-xl/80">
             <HelpCircle className="w-5 h-5" />
           </div>
           <div>
             <span className="text-[11px] text-slate-400 block font-medium">Link Enviado (Pendente)</span>
-            <span className="text-xl font-display font-bold text-slate-800">{pendingCapture}</span>
+            <span className="text-xl font-display font-bold text-slate-800 dark:text-white">{pendingCapture}</span>
           </div>
         </div>
 
-        <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-xs flex items-center gap-3">
+        <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 p-4 rounded-2xl border border-slate-100 shadow-xs flex items-center gap-3">
           <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl">
             <DollarSign className="w-5 h-5" />
           </div>
@@ -505,119 +529,115 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
 
       </div>
 
-      {/* 2. Main Search filter controls row */}
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 shrink-0">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          
-          {/* Tabs switch panel (Status filtering) */}
-          <div className="flex flex-wrap gap-1.5 bg-slate-50 p-1 rounded-xl w-fit">
-            <button
-               onClick={() => setActiveTab('Todos')}
-               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition ${activeTab === 'Todos' ? 'bg-white text-slate-800 shadow-xs' : 'text-slate-400 hover:text-slate-600'}`}
-            >
-              Todos ({contracts.length})
-            </button>
-            <button
-               onClick={() => setActiveTab(ContractStatus.PENDING)}
-               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition ${activeTab === ContractStatus.PENDING ? 'bg-white text-amber-700 shadow-xs' : 'text-slate-400 hover:text-slate-600'}`}
-            >
-              Pendentes ({contracts.filter(c => c.status === ContractStatus.PENDING).length})
-            </button>
-            <button
-               onClick={() => setActiveTab(ContractStatus.RECORDED)}
-               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition ${activeTab === ContractStatus.RECORDED ? 'bg-white text-indigo-700 shadow-xs' : 'text-slate-400 hover:text-slate-600'}`}
-            >
-              Gravados ({contracts.filter(c => c.status === ContractStatus.RECORDED).length})
-            </button>
-            <button
-               onClick={() => setActiveTab(ContractStatus.APPROVED)}
-               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition ${activeTab === ContractStatus.APPROVED ? 'bg-white text-emerald-700 shadow-xs' : 'text-slate-400 hover:text-slate-600'}`}
-            >
-              Aprovados ({contracts.filter(c => c.status === ContractStatus.APPROVED).length})
-            </button>
-            <button
-               onClick={() => setActiveTab(ContractStatus.REJECTED)}
-               className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition ${activeTab === ContractStatus.REJECTED ? 'bg-white text-rose-700 shadow-xs' : 'text-slate-400 hover:text-slate-600'}`}
-            >
-              Reprovados ({contracts.filter(c => c.status === ContractStatus.REJECTED).length})
-            </button>
-          </div>
-
-          {/* Action trigger row items */}
+      {/* 2 & 3. Main Contracts Table View with integrated Search & Filters */}
+      <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-2xl shadow-sm border border-slate-100 overflow-hidden mt-6">
+        {/* Table Header & Controls Area */}
+        <div className="p-4 border-b border-slate-100 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50/50 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
           <div className="flex items-center gap-2">
-            
-            {/* Search Input field */}
-            <div className="relative flex-1 md:w-64">
-              <Search className="absolute left-3 top-2.5 w-4.5 h-4.5 text-slate-400" />
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Pesquisar por nome, CPF ou banco..."
-                className="w-full pl-9 pr-4 py-2 text-xs border border-slate-200 rounded-xl focus:border-primary-500 focus:outline-hidden"
-              />
-            </div>
-
-            {/* Excel report export */}
-            <button
-              onClick={handleExportCSV}
-              title="Exportar base para Excel"
-              className="p-2 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-xl transition"
-            >
-              <FileSpreadsheet className="w-4.5 h-4.5" />
-            </button>
-
-            {/* Create Proposal Button */}
-            <button
-              onClick={() => setShowCreateModal(true)}
-              className="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white font-semibold text-xs rounded-xl transition flex items-center gap-1.5"
-            >
-              <Plus className="w-4 h-4" /> Nova Formalização
-            </button>
-          </div>
-
-        </div>
-      </div>
-
-      {/* 3. Contracts List Table View panel */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        {/* Table List Column (2 cols width on screen) */}
-        <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-100 overflow-hidden shadow-xs">
-          <div className="p-4 border-b border-slate-50 flex justify-between items-center bg-slate-50/50">
-            <div className="flex items-center gap-2">
-              <h3 className="font-display font-semibold text-slate-800 text-xs uppercase tracking-wider">Painel Geral de Propostas</h3>
-              {supabase ? (
-                <button 
-                  onClick={syncDatabase} 
-                  type="button"
-                  disabled={isSyncing}
-                  className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-bold text-teal-700 bg-teal-50 border border-teal-100 hover:bg-teal-100/50 transition cursor-pointer select-none"
-                  title="Clique para sincronizar manualmente"
-                >
-                  <div className={`w-1.5 h-1.5 bg-teal-500 rounded-full ${isSyncing ? 'animate-ping' : 'animate-pulse'}`} />
-                  <span>SUPABASE ATIVO</span>
-                  {syncMessage && <span className="text-slate-500 font-normal">({syncMessage})</span>}
-                </button>
-              ) : (
-                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-bold text-slate-500 bg-slate-50 border border-slate-250 select-none">
+            <h3 className="font-display font-semibold text-slate-800 dark:text-white text-[13px] uppercase tracking-wider shrink-0">Painel Geral de Propostas</h3>
+            <span className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 border border-slate-200 text-slate-600 dark:text-slate-400 text-[10px] px-2 py-0.5 rounded-full font-bold">{filteredContracts.length}</span>
+            {supabase ? (
+              <button 
+                onClick={syncDatabase} 
+                type="button"
+                disabled={isSyncing}
+                className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-bold text-teal-700 bg-teal-50 border border-teal-100 hover:bg-teal-100/50 transition cursor-pointer select-none ml-2"
+                title="Clique para sincronizar manualmente"
+              >
+                <div className={`w-1.5 h-1.5 bg-teal-500 rounded-full ${isSyncing ? 'animate-ping' : 'animate-pulse'}`} />
+                <span>SUPABASE ATIVO</span>
+                {syncMessage && <span className="text-teal-600 font-normal">({syncMessage})</span>}
+              </button>
+            ) : (
+                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-bold text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 select-none ml-2">
                   <div className="w-1.5 h-1.5 bg-slate-400 rounded-full" />
                   <span>MODO LOCAL</span>
                 </div>
-              )}
-            </div>
-            <button 
-              onClick={handleResetDatabase}
-              className="text-[10px] text-slate-400 hover:text-slate-600 flex items-center gap-1 transition"
-            >
-              <RefreshCw className="w-3 h-3" /> Restaurar Modelos
-            </button>
+            )}
           </div>
+
+          <div className="flex flex-col md:flex-row md:items-center justify-end gap-3 flex-1 overflow-x-auto">
+            {/* Tabs switch panel (Status filtering) */}
+            <div className="flex flex-nowrap shrink-0 gap-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 border border-slate-200 p-1 rounded-xl">
+              <button
+                 onClick={() => setActiveTab('Todos')}
+                 className={`px-3 py-1.5 text-[11px] font-semibold rounded-lg transition whitespace-nowrap ${activeTab === 'Todos' ? 'bg-slate-100 text-slate-800 shadow-xs border border-slate-200/50' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                Todos ({contracts.length})
+              </button>
+              <button
+                 onClick={() => setActiveTab(ContractStatus.PENDING)}
+                 className={`px-3 py-1.5 text-[11px] font-semibold rounded-lg transition whitespace-nowrap ${activeTab === ContractStatus.PENDING ? 'bg-amber-50 text-amber-700 shadow-xs border border-amber-100' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                Pendentes ({contracts.filter(c => c.status === ContractStatus.PENDING).length})
+              </button>
+              <button
+                 onClick={() => setActiveTab(ContractStatus.RECORDED)}
+                 className={`px-3 py-1.5 text-[11px] font-semibold rounded-lg transition whitespace-nowrap ${activeTab === ContractStatus.RECORDED ? 'bg-indigo-50 text-indigo-700 shadow-xs border border-indigo-100' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                Gravados ({contracts.filter(c => c.status === ContractStatus.RECORDED).length})
+              </button>
+              <button
+                 onClick={() => setActiveTab(ContractStatus.APPROVED)}
+                 className={`px-3 py-1.5 text-[11px] font-semibold rounded-lg transition whitespace-nowrap ${activeTab === ContractStatus.APPROVED ? 'bg-emerald-50 text-emerald-700 shadow-xs border border-emerald-100' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                Aprovados ({contracts.filter(c => c.status === ContractStatus.APPROVED).length})
+              </button>
+              <button
+                 onClick={() => setActiveTab(ContractStatus.REJECTED)}
+                 className={`px-3 py-1.5 text-[11px] font-semibold rounded-lg transition whitespace-nowrap ${activeTab === ContractStatus.REJECTED ? 'bg-rose-50 text-rose-700 shadow-xs border border-rose-100' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                Reprovados ({contracts.filter(c => c.status === ContractStatus.REJECTED).length})
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {/* Search filter Input field */}
+              <div className="relative w-full md:w-56 shrink-0">
+                <Search className="absolute left-3 top-2.5 w-4.5 h-4.5 text-slate-400" />
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="Buscador Universal..."
+                  className="w-full pl-9 pr-4 py-2 text-xs border border-slate-300 bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-xl focus:border-primary-500 focus:outline-hidden"
+                />
+              </div>
+
+              {/* Excel report export */}
+              <button
+                onClick={handleExportCSV}
+                title="Exportar base para Excel"
+                className="p-2 bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:bg-slate-900/50 text-slate-700 dark:text-slate-300 border border-slate-300 rounded-xl transition"
+              >
+                <FileSpreadsheet className="w-4.5 h-4.5" />
+              </button>
+
+              {/* Create Proposal Button */}
+              <button
+                onClick={() => setShowCreateModal(true)}
+                className="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white font-semibold text-xs rounded-xl transition flex items-center shadow-sm gap-1.5 whitespace-nowrap"
+              >
+                <Plus className="w-4 h-4" /> Nova Formalização
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Database tools hidden / moved to secondary bar to save space */}
+        <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700/50 px-4 py-2 border-b border-slate-100 flex justify-end">
+          <button 
+            onClick={handleResetDatabase}
+            className="text-[10px] text-slate-400 hover:text-slate-600 dark:text-slate-400 flex items-center gap-1 transition"
+          >
+            <RefreshCw className="w-3 h-3" /> Restaurar Modelos Padrão
+          </button>
+        </div>
 
           <div className="overflow-x-auto">
             <table className="w-full text-left font-sans text-xs">
-              <thead className="bg-slate-50/20 text-slate-400 uppercase tracking-widest text-[9.5px]">
-                <tr className="border-b border-slate-100">
+              <thead className="bg-slate-50 dark:bg-slate-900/50/20 text-slate-400 uppercase tracking-widest text-[9.5px]">
+                <tr className="border-b border-slate-100 dark:border-slate-700">
                   <th className="p-4">Contrato / Cliente</th>
                   <th className="p-4">Banco Parceiro</th>
                   <th className="p-4">Valor Líquido</th>
@@ -640,14 +660,14 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                       onClick={() => handleInspectContract(contract)}
                     >
                       <td className="p-4">
-                        <div className="font-semibold text-slate-800 text-xs tracking-tight">{contract.clientName}</div>
+                        <div className="font-semibold text-slate-800 dark:text-white text-xs tracking-tight">{contract.clientName}</div>
                         <div className="text-[10px] text-slate-400 flex items-center gap-1.5 mt-0.5">
-                          <span className="font-mono bg-slate-100 px-1.5 py-0.2 rounded-sm text-slate-600">{contract.contractNumber}</span>
+                          <span className="font-mono bg-slate-100 px-1.5 py-0.2 rounded-sm text-slate-600 dark:text-slate-400">{contract.contractNumber}</span>
                           <span className="font-mono">CPF: {contract.clientCpf}</span>
                         </div>
                       </td>
-                      <td className="p-4 text-slate-600 font-semibold text-[11px]">{contract.bankName}</td>
-                      <td className="p-4 text-slate-700">
+                      <td className="p-4 text-slate-600 dark:text-slate-400 font-semibold text-[11px]">{contract.bankName}</td>
+                      <td className="p-4 text-slate-700 dark:text-slate-300">
                         <div className="font-medium">{formatBRL(contract.releasedValue)}</div>
                         <div className="text-[10px] text-slate-400">{contract.installmentsCount} parcelas de {formatBRL(contract.installmentValue)}</div>
                       </td>
@@ -685,7 +705,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                           <button
                             onClick={() => handleCopyShareLink(contract)}
                             title="Copiar link de formalização"
-                            className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition relative"
+                            className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 dark:text-slate-300 rounded-lg transition relative"
                           >
                             {copiedId === contract.id ? (
                               <Check className="w-3.5 h-3.5 text-emerald-600" />
@@ -721,21 +741,23 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
           </div>
         </div>
 
-        {/* Audit Details Panel (Right hand 1/3 sidebar) */}
-        <div className="bg-white rounded-2xl border border-slate-100 p-4 shadow-xs">
-          {selectedContract ? (
+      {/* Audit Details Modal */}
+      {selectedContract && (
+        <div className="fixed inset-0 bg-slate-950/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fadeIn" id="contract-detail-modal">
+          <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-2xl border border-slate-100 shadow-2xl overflow-hidden max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6 relative">
+            <button
+               onClick={() => setSelectedContract(null)}
+               className="absolute top-4 right-4 p-2 bg-slate-100 hover:bg-slate-200 text-slate-500 dark:text-slate-400 rounded-full transition"
+               title="Fechar"
+            >
+              <XCircle className="w-5 h-5 text-slate-500 dark:text-slate-400" />
+            </button>
             <div className="space-y-4" id="contract-detail-panel">
-              <div className="flex justify-between items-start border-b border-slate-100 pb-3">
-                <div>
-                  <h4 className="font-display font-medium text-slate-800 text-xs uppercase tracking-wider">Auditar Pasta do Cliente</h4>
-                  <span className="font-mono text-[10px] text-slate-400">Contrato: {selectedContract.contractNumber}</span>
+              <div className="flex justify-between items-start border-b border-slate-100 dark:border-slate-700 pb-3">
+                <div className="pr-10">
+                  <h4 className="font-display font-medium text-slate-800 dark:text-white text-sm uppercase tracking-wider">Auditar Pasta do Cliente</h4>
+                  <span className="font-mono text-xs text-slate-400">Contrato: {selectedContract.contractNumber}</span>
                 </div>
-                <button
-                  onClick={() => setSelectedContract(null)}
-                  className="text-xs text-slate-400 hover:text-slate-600"
-                >
-                  Ocultar
-                </button>
               </div>
 
               {/* Status banner */}
@@ -759,7 +781,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
               </div>
 
               {/* Tab Selector for Inspector Options */}
-              <div className="flex border-b border-slate-100 text-[11px] font-bold shrink-0 pt-1">
+              <div className="flex border-b border-slate-100 dark:border-slate-700 text-[11px] font-bold shrink-0 pt-1">
                 <button
                   type="button"
                   onClick={() => setDetailActiveTab('details')}
@@ -788,12 +810,29 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
               {detailActiveTab === 'details' ? (
                 <div className="space-y-4">
                   {/* Customer Core Information */}
-                  <div className="p-3 bg-slate-50 rounded-xl space-y-1.5 text-xs border border-slate-100">
-                    <p><span className="text-slate-400">Proponente:</span> <span className="font-medium text-slate-700">{selectedContract.clientName}</span></p>
-                    <p><span className="text-slate-400">Banco:</span> <span className="font-medium text-slate-700">{selectedContract.bankName}</span></p>
-                    <p><span className="text-slate-400">Crédito Líquido:</span> <span className="font-bold text-slate-800">{formatBRL(selectedContract.releasedValue)}</span></p>
-                    <p><span className="text-slate-400">Valores:</span> <span className="text-slate-600">{selectedContract.installmentsCount} parcelas de {formatBRL(selectedContract.installmentValue)}</span></p>
-                    <p><span className="text-slate-400">Criado em:</span> <span className="text-slate-600">{new Date(selectedContract.createdAt).toLocaleString('pt-BR')}</span></p>
+                  <div className="p-3 bg-slate-50 dark:bg-slate-900/50 rounded-xl space-y-1.5 text-xs border border-slate-100 dark:border-slate-700">
+                    <p><span className="text-slate-400">Proponente:</span> <span className="font-medium text-slate-700 dark:text-slate-300">{selectedContract.clientName}</span></p>
+                    <p><span className="text-slate-400">Banco:</span> <span className="font-medium text-slate-700 dark:text-slate-300">{selectedContract.bankName}</span></p>
+                    <p><span className="text-slate-400">Crédito Líquido:</span> <span className="font-bold text-slate-800 dark:text-white">{formatBRL(selectedContract.releasedValue)}</span></p>
+                    <p><span className="text-slate-400">Valores:</span> <span className="text-slate-600 dark:text-slate-400">{selectedContract.installmentsCount} parcelas de {formatBRL(selectedContract.installmentValue)}</span></p>
+                    <p><span className="text-slate-400">Criado em:</span> <span className="text-slate-600 dark:text-slate-400">{new Date(selectedContract.createdAt).toLocaleString('pt-BR')}</span></p>
+                    
+                    {selectedContract.metadata && (
+                      <div className="pt-2 mt-2 border-t border-slate-200 dark:border-slate-700 space-y-1.5">
+                        <p><span className="text-slate-400 block text-[9px] font-bold uppercase mb-0.5">Informações de Rastreabilidade</span></p>
+                        <p><span className="text-slate-400 text-[10.5px]">Endereço IP:</span> <span className="font-mono text-[10.5px] font-medium text-slate-600 dark:text-slate-400">{selectedContract.metadata.ipAddress}</span></p>
+                        {selectedContract.metadata.geolocation && (
+                          <p className="flex items-start gap-1">
+                            <span className="text-slate-400 text-[10.5px] mt-0.5 whitespace-nowrap">Localização (GPS):</span> 
+                            <span className="font-mono text-[10.5px] font-medium text-slate-600 dark:text-slate-400 flex flex-col">
+                              <span>Lat: {selectedContract.metadata.geolocation.latitude}</span>
+                              <span>Lng: {selectedContract.metadata.geolocation.longitude}</span>
+                              <a href={`https://www.google.com/maps/search/?api=1&query=${selectedContract.metadata.geolocation.latitude},${selectedContract.metadata.geolocation.longitude}`} target="_blank" rel="noreferrer" className="text-indigo-600 hover:text-indigo-700 mt-0.5 underline">Ver no Mapa</a>
+                            </span>
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {/* Show Audit Files triggers if recorded or reviewed */}
@@ -803,9 +842,9 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                       
                       {/* Signature visual */}
                       {selectedContract.signatureImage && (
-                        <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-center">
+                        <div className="bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl p-2.5 text-center">
                           <span className="text-[9.5px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Assinatura Eletrônica</span>
-                          <div className="bg-white rounded-lg p-1 border border-slate-100 flex items-center justify-center max-w-full h-16">
+                          <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-lg p-1 border border-slate-100 flex items-center justify-center max-w-full h-16">
                             <img 
                               src={selectedContract.signatureImage} 
                               alt="Assinatura Cliente" 
@@ -817,11 +856,11 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                       )}
 
                       {/* Video compliance playback and MP4 download */}
-                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-center">
+                      <div className="bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl p-2.5 text-center">
                         <span className="text-[9.5px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Gravação em Vídeo de Aceite</span>
                         {videoUrl ? (
                           <div className="space-y-2">
-                            <div className="bg-black rounded-lg overflow-hidden border border-slate-200 aspect-video flex items-center justify-center">
+                            <div className="bg-black rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 aspect-video flex items-center justify-center">
                               <video 
                                 src={videoUrl} 
                                 controls 
@@ -837,10 +876,10 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                             </a>
                           </div>
                         ) : (
-                          <div className="space-y-1 py-3 px-1 bg-slate-100 rounded-lg border border-dashed border-slate-200 text-center">
+                          <div className="space-y-1 py-3 px-1 bg-slate-100 rounded-lg border border-dashed border-slate-200 dark:border-slate-700 text-center">
                             <Play className="w-5 h-5 text-slate-400 mx-auto mb-1" />
-                            <p className="text-[10px] text-slate-500 font-medium leading-none">Contrato de Teste Modelo</p>
-                            <p className="text-[8.5px] text-slate-400 leading-tight px-1 mt-0.5">Use o botão <strong className="text-slate-500">"Simular visualizador"</strong> ao lado para gravar um vídeo real de demonstração.</p>
+                            <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium leading-none">Contrato de Teste Modelo</p>
+                            <p className="text-[8.5px] text-slate-400 leading-tight px-1 mt-0.5">Use o botão <strong className="text-slate-500 dark:text-slate-400">"Simular visualizador"</strong> ao lado para gravar um vídeo real de demonstração.</p>
                           </div>
                         )}
                       </div>
@@ -857,7 +896,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
 
                       {/* Action Review Buttons */}
                       {selectedContract.status === ContractStatus.RECORDED && (
-                        <div className="space-y-2 border-t border-slate-100 pt-3">
+                        <div className="space-y-2 border-t border-slate-100 dark:border-slate-700 pt-3">
                           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Decisão Probatória da Auditoria</span>
                           
                           {!showRejectPanel ? (
@@ -884,12 +923,12 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                                 value={rejectionReasonInput}
                                 onChange={(e) => setRejectionReasonInput(e.target.value)}
                                 placeholder="Ex: Áudio inaudível, cpf errado, etc"
-                                className="w-full text-xs p-1.5 bg-white border border-rose-200 rounded-md focus:outline-hidden text-rose-900"
+                                className="w-full text-xs p-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 border border-rose-200 rounded-md focus:outline-hidden text-rose-900"
                               />
                               <div className="flex justify-end gap-1.5">
                                 <button
                                   onClick={() => setShowRejectPanel(false)}
-                                  className="px-2.5 py-1 text-[10px] bg-slate-200 rounded-md text-slate-600 hover:bg-slate-300 transition"
+                                  className="px-2.5 py-1 text-[10px] bg-slate-200 rounded-md text-slate-600 dark:text-slate-400 hover:bg-slate-300 transition"
                                 >
                                   Voltar
                                 </button>
@@ -910,7 +949,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                       )}
 
                       {(selectedContract.status === ContractStatus.APPROVED || selectedContract.status === ContractStatus.REJECTED) && (
-                        <div className="space-y-2 border-t border-slate-100 pt-3">
+                        <div className="space-y-2 border-t border-slate-100 dark:border-slate-700 pt-3">
                           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">AÇÕES CORRETIVAS</span>
                           <button
                             onClick={() => handleRenewLink(selectedContract.id)}
@@ -922,16 +961,16 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                       )}
                     </div>
                   ) : (
-                    <div className="p-3 bg-amber-50/40 border border-amber-100 rounded-xl text-[11px] text-slate-600 text-center space-y-3">
+                    <div className="p-3 bg-amber-50/40 border border-amber-100 rounded-xl text-[11px] text-slate-600 dark:text-slate-400 text-center space-y-3">
                       <p>Este cliente ainda não iniciou a validação técnica de conformidade.</p>
-                      <p className="font-medium text-slate-700">Copie o link seguro de envio e envie ao cliente para que ele possa realizar a assinatura digital e gravação da biometria:</p>
+                      <p className="font-medium text-slate-700 dark:text-slate-300">Copie o link seguro de envio e envie ao cliente para que ele possa realizar a assinatura digital e gravação da biometria:</p>
                       
                       {isContractExpired(selectedContract) ? (
                         <div className="p-2.5 border border-rose-200 bg-rose-50 text-rose-800 rounded-lg text-[10.5px] space-y-2 mb-1">
                           <p className="font-bold flex items-center justify-center gap-1">
                             <Clock className="w-3.5 h-3.5 text-rose-600" /> Link Expirado! (Criado há +24h)
                           </p>
-                          <p className="text-[10px] text-slate-500">O cliente receberá uma mensagem de erro informando que o link expirou ao tentar acessá-lo.</p>
+                          <p className="text-[10px] text-slate-500 dark:text-slate-400">O cliente receberá uma mensagem de erro informando que o link expirou ao tentar acessá-lo.</p>
                           <button
                             onClick={() => handleRenewLink(selectedContract.id)}
                             className="w-full py-1.5 px-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[10.5px] font-bold transition flex items-center justify-center gap-1 cursor-pointer shadow-xs"
@@ -944,12 +983,12 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                           <p className="font-bold flex items-center justify-center gap-1 text-emerald-700">
                             ✓ Link Seguro Válido e Ativo
                           </p>
-                          <p className="text-slate-500 mt-0.5">Válido até: {new Date(new Date(selectedContract.createdAt).getTime() + 24 * 60 * 60 * 1000).toLocaleString('pt-BR')}</p>
+                          <p className="text-slate-500 dark:text-slate-400 mt-0.5">Válido até: {new Date(new Date(selectedContract.createdAt).getTime() + 24 * 60 * 60 * 1000).toLocaleString('pt-BR')}</p>
                         </div>
                       )}
 
                       {/* Professional Shareable link input field copy widget */}
-                      <div className="space-y-1.5 rounded-lg bg-white p-2 border border-slate-200 text-left">
+                      <div className="space-y-1.5 rounded-lg bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 p-2 border border-slate-200 text-left">
                         <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">URL de Formalização</span>
                         <div className="flex gap-1">
                           <input
@@ -959,8 +998,8 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                               (e.target as HTMLInputElement).select();
                               handleCopyShareLink(selectedContract);
                             }}
-                            value={`${window.location.origin}${window.location.pathname}?formalizar=${selectedContract.id}`}
-                            className="bg-slate-50 border border-slate-100 rounded-lg py-1 px-2 text-[10px] text-slate-600 truncate flex-1 select-all cursor-pointer font-mono h-7"
+                            value={generateShareLink(selectedContract)}
+                            className="bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-700 rounded-lg py-1 px-2 text-[10px] text-slate-600 dark:text-slate-400 truncate flex-1 select-all cursor-pointer font-mono h-7"
                           />
                           <button
                             type="button"
@@ -994,9 +1033,9 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
               ) : (
                 /* Tab: Chronological Customer Interaction Timeline */
                 <div className="space-y-4">
-                  <div className="flex items-center gap-1.5 pb-1 border-b border-slate-100">
+                  <div className="flex items-center gap-1.5 pb-1 border-b border-slate-100 dark:border-slate-700">
                     <History className="w-4 h-4 text-indigo-600" />
-                    <h5 className="font-semibold text-slate-700 text-xs">Histórico de Interações</h5>
+                    <h5 className="font-semibold text-slate-700 dark:text-slate-300 text-xs">Histórico de Interações</h5>
                   </div>
                   <div className="relative pl-3.5 border-l-2 border-indigo-100 space-y-4 py-1 ml-1.5">
                     {selectedLogs && selectedLogs.length > 0 ? (
@@ -1016,7 +1055,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                             
                             <div className="flex flex-col">
                               <div className="flex items-start justify-between gap-1.5 text-[11px]">
-                                <span className="font-bold text-slate-800 leading-snug">{log.action}</span>
+                                <span className="font-bold text-slate-800 dark:text-white leading-snug">{log.action}</span>
                                 <span className="font-mono text-[9px] text-slate-400 shrink-0 flex items-center gap-0.5">
                                   <Clock className="w-2.5 h-2.5" />
                                   {new Date(log.timestamp).toLocaleString('pt-BR', {
@@ -1025,7 +1064,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                                   })}
                                 </span>
                               </div>
-                              <p className="text-[10px] text-slate-500 mt-1 leading-relaxed bg-slate-50 p-2 rounded-lg border border-slate-100 font-sans">
+                              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-100 dark:border-slate-700 font-sans">
                                 {log.description}
                               </p>
                             </div>
@@ -1042,19 +1081,14 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
               )}
 
             </div>
-          ) : (
-            <div className="text-center py-20 text-slate-400 text-xs">
-              Selecione um contrato na tabela ao lado para visualizar a pasta de auditoria do cliente.
-            </div>
-          )}
+          </div>
         </div>
-
-      </div>
+      )}
 
       {/* 4. MODAL: CREATE CONTRACT */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-slate-950/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fadeIn" id="create-contract-modal">
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-2xl overflow-hidden max-w-lg w-full">
+          <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-2xl border border-slate-100 shadow-2xl overflow-hidden max-w-lg w-full">
             
             <div className="p-4 bg-slate-900 text-white flex justify-between items-center">
               <div>
@@ -1077,20 +1111,20 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
               )}
 
               <div>
-                <label className="block text-slate-600 font-semibold mb-1">Nome Completo do Cliente *</label>
+                <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">Nome Completo do Cliente *</label>
                 <input
                   type="text"
                   required
                   value={newClientName}
                   onChange={(e) => setNewClientName(e.target.value)}
                   placeholder="Ex: Maria de Oliveira Santos"
-                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-hidden focus:border-primary-500"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl text-xs focus:outline-hidden focus:border-primary-500"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-slate-600 font-semibold mb-1">Inscrição CPF Titular *</label>
+                  <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">Inscrição CPF Titular *</label>
                   <input
                     type="text"
                     required
@@ -1111,7 +1145,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                     }}
                     placeholder="000.000.000-00"
                     maxLength={14}
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-hidden focus:border-primary-500 font-mono font-semibold"
+                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl text-xs focus:outline-hidden focus:border-primary-500 font-mono font-semibold"
                   />
                   {newClientCpf && (
                     <div className="mt-1 text-[10px] font-medium">
@@ -1127,21 +1161,21 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                 </div>
 
                 <div>
-                  <label className="block text-slate-600 font-semibold mb-1">Número do Contrato *</label>
+                  <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">Número do Contrato *</label>
                   <input
                     type="text"
                     required
                     value={newContractNumber}
                     onChange={(e) => setNewContractNumber(e.target.value)}
                     placeholder="Ex: 8594032"
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-hidden focus:border-primary-500"
+                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl text-xs focus:outline-hidden focus:border-primary-500"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2">
-                  <label className="block text-slate-600 font-semibold mb-1">Banco Emitente *</label>
+                  <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">Banco Emitente *</label>
                   <input
                     type="text"
                     required
@@ -1149,7 +1183,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                     value={newBankName}
                     onChange={(e) => setNewBankName(e.target.value)}
                     placeholder="Ex: Banco Itaú Consignado"
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-hidden focus:border-primary-500"
+                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl text-xs focus:outline-hidden focus:border-primary-500"
                   />
                   <datalist id="banks-suggest-list">
                     {BANK_OPTIONS.map(bank => (
@@ -1159,7 +1193,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                 </div>
 
                 <div>
-                  <label className="block text-slate-600 font-semibold mb-1">Prazo (Meses) *</label>
+                  <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">Prazo (Meses) *</label>
                   <input
                     type="number"
                     required
@@ -1168,14 +1202,14 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                     value={newInstallmentsCount}
                     onChange={(e) => setNewInstallmentsCount(parseInt(e.target.value) || 12)}
                     placeholder="Ex: 48"
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-hidden focus:border-primary-500"
+                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl text-xs focus:outline-hidden focus:border-primary-500"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-slate-600 font-semibold mb-1">Valor Liberado (R$) *</label>
+                  <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">Valor Liberado (R$) *</label>
                   <input
                     type="number"
                     required
@@ -1184,12 +1218,12 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                     value={newReleasedValue}
                     onChange={(e) => setNewReleasedValue(e.target.value)}
                     placeholder="Ex: 15450.00"
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:outline-hidden focus:border-primary-500"
+                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-mono focus:outline-hidden focus:border-primary-500"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-slate-600 font-semibold mb-1">Valor da Parcela (R$) *</label>
+                  <label className="block text-slate-600 dark:text-slate-400 font-semibold mb-1">Valor da Parcela (R$) *</label>
                   <input
                     type="number"
                     required
@@ -1201,7 +1235,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                       setUserHasEditedInstallment(true);
                     }}
                     placeholder="Ex: 450.00"
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:outline-hidden focus:border-primary-500"
+                    className="w-full p-2.5 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-mono focus:outline-hidden focus:border-primary-500"
                   />
                 </div>
               </div>
@@ -1210,7 +1244,7 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
                 <button
                   type="button"
                   onClick={() => setShowCreateModal(false)}
-                  className="w-1/2 py-2.5 bg-slate-150 hover:bg-slate-205 text-slate-600 rounded-xl transition font-medium"
+                  className="w-1/2 py-2.5 bg-slate-150 hover:bg-slate-205 text-slate-600 dark:text-slate-400 rounded-xl transition font-medium"
                 >
                   Cancelar
                 </button>
@@ -1224,6 +1258,71 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
 
             </form>
 
+          </div>
+        </div>
+      )}
+
+      {showCreatedLinkModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-[2px] flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-2xl w-full max-w-[450px] shadow-2xl overflow-hidden border border-slate-100 flex flex-col transform transition-all text-sm">
+            <div className="p-5 border-b border-slate-100 dark:border-slate-700 flex items-center justify-between text-slate-800 dark:text-white bg-emerald-50">
+              <h3 className="font-display font-bold flex items-center gap-1.5 text-emerald-800">
+                <Check className="w-4 h-4" /> Link Gerado com Sucesso!
+              </h3>
+              <button 
+                onClick={() => setShowCreatedLinkModal(false)}
+                className="text-emerald-500 hover:text-emerald-700 font-bold p-1 transition cursor-pointer"
+              >
+                X
+              </button>
+            </div>
+            <div className="p-6 space-y-4 text-center">
+              <p className="text-xs text-slate-600 dark:text-slate-400 mb-2">
+                O contrato e o link de formalização foram criados com sucesso e estão prontos para envio ao cliente.
+              </p>
+              
+              <div className="flex gap-2">
+                <input 
+                  type="text" 
+                  readOnly 
+                  value={createdLinkUrl} 
+                  className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-[10px] font-mono text-slate-500 dark:text-slate-400 focus:outline-hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(createdLinkUrl);
+                    setCopiedId('url_generated');
+                    setTimeout(() => setCopiedId(null), 3000);
+                  }}
+                  className={`px-3 py-2 rounded-xl text-[11px] font-bold transition flex items-center gap-1 cursor-pointer whitespace-nowrap ${
+                    copiedId === 'url_generated'
+                      ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+                      : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-100'
+                  }`}
+                >
+                  {copiedId === 'url_generated' ? <><Check className="w-3.5 h-3.5" /> Copiado</> : 'Copiar Link'}
+                </button>
+              </div>
+
+              <div className="pt-2 flex gap-3">
+                <button
+                  onClick={() => setShowCreatedLinkModal(false)}
+                  className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-md transition cursor-pointer"
+                >
+                  Concluir & Fechar
+                </button>
+                <button
+                  onClick={() => {
+                     window.open(`https://api.whatsapp.com/send?text=${encodeURIComponent(`Acesse o link para formalizar sua proposta: ` + createdLinkUrl)}`, '_blank')
+                     setShowCreatedLinkModal(false);
+                  }}
+                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-md transition cursor-pointer flex justify-center items-center gap-1"
+                >
+                  Enviar WhatsApp
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

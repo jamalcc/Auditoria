@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Camera, Mic, MapPin, AlertCircle, RefreshCw, CheckCircle, Video, Check, Square, Shield, Eye, PenTool, Clock } from 'lucide-react';
 import { Contract, ContractStatus, ClientMetadata } from '../types';
-import { saveVideoBlob, addAuditLog, saveContracts, getContracts, uploadVideoToSupabase, syncWithSupabase } from '../services/db';
+import { saveVideoBlob, addAuditLog, saveContracts, getContracts, uploadVideoToSupabase, syncWithSupabase, reconstructContractFromUrl } from '../services/db';
 
 interface ClientWizardProps {
   contractId: string;
@@ -103,7 +103,13 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
       }
       
       const contracts = getContracts();
-      const currentContract = contracts.find(c => c.id === contractId);
+      let currentContract = contracts.find(c => c.id === contractId);
+      if (!currentContract) {
+        const reconstructed = reconstructContractFromUrl(contractId);
+        if (reconstructed) {
+          currentContract = reconstructed;
+        }
+      }
       if (currentContract) {
         const createdTime = new Date(currentContract.createdAt).getTime();
         const isExpired = (Date.now() - createdTime) > 24 * 60 * 60 * 1000;
@@ -205,6 +211,26 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
     setRecordedBlob(null);
     setIsSimulatedVideo(false);
     
+    // Captura de localização no momento da gravação
+    if ('geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setLocationPermission('granted');
+          const newLocation = {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            accuracy: position.coords.accuracy
+          };
+          setLocationData(newLocation);
+          addAuditLog(contractId, 'Localização Capturada', `Coordenadas capturadas no início da gravação: Lat ${newLocation.latitude.toFixed(6)}, Lng ${newLocation.longitude.toFixed(6)}`);
+        },
+        (err) => {
+          console.warn('Localização recusada ou falha na precisão.');
+        },
+        { enableHighAccuracy: true, timeout: 5000 }
+      );
+    }
+
     if (!mediaStream) {
       // Trigger simulation mode if no webcam is running due to iframe sandbox or missing hardware
       startSimulatedRecording();
@@ -267,6 +293,26 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
     setIsRecording(true);
     setRecordingSeconds(0);
     setIsSimulatedVideo(true);
+    
+    // Captura de localização no momento da gravação simulada
+    if ('geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setLocationPermission('granted');
+          const newLocation = {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            accuracy: position.coords.accuracy
+          };
+          setLocationData(newLocation);
+          addAuditLog(contractId, 'Localização Capturada', `Coordenadas capturadas no início da gravação: Lat ${newLocation.latitude.toFixed(6)}, Lng ${newLocation.longitude.toFixed(6)}`);
+        },
+        (err) => {
+          console.warn('Localização recusada ou falha na precisão.');
+        },
+        { enableHighAccuracy: true, timeout: 5000 }
+      );
+    }
     
     timerRef.current = setInterval(() => {
       setRecordingSeconds(prev => {
@@ -501,10 +547,10 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
 
   if (errorMessage && !contract) {
     return (
-      <div className="max-w-xl mx-auto my-12 bg-white rounded-2xl p-8 shadow-sm border border-slate-100 text-center">
+      <div className="max-w-xl mx-auto my-12 bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-2xl p-8 shadow-sm border border-slate-100 text-center">
         <AlertCircle className="w-16 h-16 text-rose-500 mx-auto mb-4" />
-        <h2 className="text-xl font-display font-semibold text-slate-800 mb-2">Ops! Link Inválido</h2>
-        <p className="text-slate-500 mb-6">{errorMessage}</p>
+        <h2 className="text-xl font-display font-semibold text-slate-800 dark:text-white mb-2">Ops! Link Inválido</h2>
+        <p className="text-slate-500 dark:text-slate-400 mb-6">{errorMessage}</p>
         {onBackToAdmin && (
           <button
             onClick={onBackToAdmin}
@@ -559,18 +605,18 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
       ) : null}
 
       {/* Steps Content */}
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+      <div className="bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
         
         {/* UNIFIED SINGLE STEP: CONTRATO RESUMO, SCRIPT & GRAVAÇÃO */}
         {step === 1 && (
           <div className="p-5 md:p-8" id="client-unified-panel">
             
             {/* Header message */}
-            <div className="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+            <div className="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-700 pb-4">
               <div>
                 <h1 className="text-xs font-semibold tracking-wider text-teal-700 uppercase mb-0.5">Ambiente Seguro do Cliente</h1>
-                <h2 className="text-lg md:text-xl font-display font-bold text-slate-800">Confirmação Digital de Proposta</h2>
-                <p className="text-xs text-slate-500">Leia os dados contratuais e grave um curto vídeo lendo o roteiro de declaração abaixo.</p>
+                <h2 className="text-lg md:text-xl font-display font-bold text-slate-800 dark:text-white">Confirmação Digital de Proposta</h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400">Leia os dados contratuais e grave um curto vídeo lendo o roteiro de declaração abaixo.</p>
               </div>
               
               {/* Live Expiration Countdown Timer (Melhoria 2) */}
@@ -606,22 +652,22 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
               <div className="lg:col-span-7 space-y-6">
                 
                 {/* 1. Resumo do Contrato */}
-                <div className="border border-slate-100 bg-slate-50/50 rounded-2xl p-5 shadow-xs">
-                  <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-4 pb-2 border-b border-slate-100">
+                <div className="border border-slate-100 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50/50 rounded-2xl p-5 shadow-xs">
+                  <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-4 pb-2 border-b border-slate-100 dark:border-slate-700">
                     Resumo do seu Contrato
                   </h3>
                   
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-4 text-xs">
                     <div>
                       <span className="text-slate-400 block text-[10px]">Nome do Titular</span>
-                      <span className="font-semibold text-slate-800 text-sm">{contract.clientName}</span>
+                      <span className="font-semibold text-slate-800 dark:text-white text-sm">{contract.clientName}</span>
                     </div>
                     <div>
                       <span className="text-slate-400 block text-[10px]">Inscrição CPF</span>
-                      <span className="font-semibold text-slate-800 font-mono text-sm">{contract.clientCpf}</span>
+                      <span className="font-semibold text-slate-800 dark:text-white font-mono text-sm">{contract.clientCpf}</span>
                     </div>
                     
-                    <div className="sm:col-span-2 my-1 border-t border-slate-100/60" />
+                    <div className="sm:col-span-2 my-1 border-t border-slate-100 dark:border-slate-700/60" />
 
                     <div>
                       <span className="text-slate-400 block text-[10px]">Banco Credor</span>
@@ -629,17 +675,17 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
                     </div>
                     <div>
                       <span className="text-slate-400 block text-[10px]">Código do Contrato</span>
-                      <span className="font-semibold text-slate-800 font-mono text-sm">{contract.contractNumber}</span>
+                      <span className="font-semibold text-slate-800 dark:text-white font-mono text-sm">{contract.contractNumber}</span>
                     </div>
 
-                    <div className="sm:col-span-2 bg-white/80 p-3 rounded-xl border border-slate-100 grid grid-cols-2 gap-2 mt-2">
+                    <div className="sm:col-span-2 bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700/80 p-3 rounded-xl border border-slate-100 grid grid-cols-2 gap-2 mt-2">
                       <div>
-                        <span className="text-slate-500 block text-[10px]">Valor Líquido Liberado</span>
+                        <span className="text-slate-500 dark:text-slate-400 block text-[10px]">Valor Líquido Liberado</span>
                         <span className="font-bold text-base text-emerald-600">{formatBRL(contract.releasedValue)}</span>
                       </div>
                       <div>
-                        <span className="text-slate-500 block text-[10px]">Prazo de Pagamento</span>
-                        <span className="font-bold text-base text-slate-800">{contract.installmentsCount} meses</span>
+                        <span className="text-slate-500 dark:text-slate-400 block text-[10px]">Prazo de Pagamento</span>
+                        <span className="font-bold text-base text-slate-800 dark:text-white">{contract.installmentsCount} meses</span>
                       </div>
                     </div>
                   </div>
@@ -650,7 +696,7 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
                   <span className="text-[10px] font-bold text-teal-700 uppercase tracking-widest block mb-2.5">
                     Roteiro para Leitura em Vídeo:
                   </span>
-                  <div className="p-4 bg-white border border-teal-100/80 rounded-xl leading-relaxed font-display text-slate-800 text-sm font-semibold select-all">
+                  <div className="p-4 bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 border border-teal-100/80 rounded-xl leading-relaxed font-display text-slate-800 dark:text-white text-sm font-semibold select-all">
                     <p className="indent-4 text-[13px] md:text-[14px]">
                       "Eu, <span className="text-teal-700 border-b-2 border-dashed border-teal-200">{contract.clientName}</span>, portador do CPF <span className="font-mono text-teal-700">{contract.clientCpf}</span>, confirmo que estou ciente da contratação do empréstimo de <span className="text-teal-700 font-mono">{formatBRL(contract.releasedValue)}</span> junto ao <span className="text-teal-700">{contract.bankName}</span>, sob o contrato número <span className="text-teal-700 font-mono">{contract.contractNumber}</span> com prazo de <span className="text-teal-700">{contract.installmentsCount} meses</span>, e declaro: 'Eu confirmo a contratação'."
                     </p>
@@ -665,7 +711,7 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
               {/* RIGHT COLUMN: CAMERA & COMMANDS (5 Cols) */}
               <div className="lg:col-span-5 space-y-4">
                 
-                <div className="border border-slate-100 rounded-2xl p-4 bg-slate-50/20 text-center">
+                <div className="border border-slate-100 dark:border-slate-700 rounded-2xl p-4 bg-slate-50 dark:bg-slate-900/50/20 text-center">
                   <span className="text-[10.5px] font-bold text-slate-400 uppercase tracking-wider block mb-3">
                     Câmera de Segurança
                   </span>
@@ -725,7 +771,7 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
                         />
                       ) : (
                         <div className="text-center p-6 text-slate-400 space-y-2">
-                          <Video className="w-10 h-10 mx-auto text-slate-500/80" />
+                          <Video className="w-10 h-10 mx-auto text-slate-500 dark:text-slate-400/80" />
                           <p className="text-xs font-semibold">Câmera em espera</p>
                           <p className="text-[9.5px] text-slate-400 max-w-xs mx-auto">Ative as permissões para carregar seu feed técnico de conformidade.</p>
                         </div>
@@ -734,9 +780,18 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
 
                     {/* Left/Right Absolute Badges overlay */}
                     {isRecording && (
-                      <div className="absolute top-2 left-2 bg-rose-600 text-white rounded-lg px-2 py-0.5 text-[10px] font-bold flex items-center gap-1 animate-pulse">
-                        <div className="w-1.5 h-1.5 bg-white rounded-full" /> {recordingSeconds}s / 20s
-                      </div>
+                      <>
+                        <div className="absolute top-2 left-2 bg-rose-600 text-white rounded-lg px-2 py-0.5 text-[10px] font-bold flex items-center gap-1 animate-pulse">
+                          <div className="w-1.5 h-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-full" /> {recordingSeconds}s / 20s
+                        </div>
+                        {locationData && (
+                          <div className="absolute bottom-2 left-2 bg-slate-900/80 backdrop-blur-md border border-slate-700 text-white rounded-lg px-2 py-1 text-[9px] font-mono flex flex-col gap-0.5 text-left">
+                            <span className="flex items-center gap-1"><MapPin className="w-2.5 h-2.5 text-emerald-400" /> GPS ATIVO</span>
+                            <span>Lat: {locationData.latitude.toFixed(6)}</span>
+                            <span>Lng: {locationData.longitude.toFixed(6)}</span>
+                          </div>
+                        )}
+                      </>
                     )}
                     {recordedVideoUrl && (
                       <div className="absolute top-2 left-2 bg-emerald-600 text-white rounded-lg px-2.5 py-0.5 text-[9.5px] font-bold">
@@ -767,7 +822,7 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
                           onClick={startRecording}
                           className="w-full py-3 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-xl shadow-md transition flex items-center justify-center gap-2"
                         >
-                          <div className="w-2.5 h-2.5 bg-white rounded-full animate-ping" /> INICIAR GRAVAÇÃO AGORA
+                          <div className="w-2.5 h-2.5 bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-full animate-ping" /> INICIAR GRAVAÇÃO AGORA
                         </button>
                       ) : (
                         <button
@@ -789,7 +844,7 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
                       <button
                         type="button"
                         onClick={resetRecording}
-                        className="w-full py-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 text-xs font-semibold rounded-xl transition flex items-center justify-center gap-1"
+                        className="w-full py-2 bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:bg-slate-900/50 text-slate-700 dark:text-slate-300 border border-slate-200 text-xs font-semibold rounded-xl transition flex items-center justify-center gap-1"
                       >
                         <RefreshCw className="w-3.5 h-3.5" /> Apagar e Gravar Novamente (Refazer)
                       </button>
@@ -846,17 +901,17 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
               <CheckCircle className="w-12 h-12 text-emerald-500 animate-bounce" />
             </div>
             
-            <h2 className="text-xl md:text-2xl font-display font-bold text-slate-800 mb-2">Formalização Realizada com Sucesso!</h2>
-            <p className="text-slate-500 text-xs max-w-lg mx-auto mb-8">
-              Obrigado, <span className="font-semibold text-slate-700">{contract.clientName}</span>. Seus dados cadastrais e declaração gravada em vídeo de conformidade foram validados judicialmente e vinculados com sucesso sob o protocolo número <span className="font-mono font-semibold text-teal-600">{contract.contractNumber}</span>.
+            <h2 className="text-xl md:text-2xl font-display font-bold text-slate-800 dark:text-white mb-2">Formalização Realizada com Sucesso!</h2>
+            <p className="text-slate-500 dark:text-slate-400 text-xs max-w-lg mx-auto mb-8">
+              Obrigado, <span className="font-semibold text-slate-700 dark:text-slate-300">{contract.clientName}</span>. Seus dados cadastrais e declaração gravada em vídeo de conformidade foram validados judicialmente e vinculados com sucesso sob o protocolo número <span className="font-mono font-semibold text-teal-600">{contract.contractNumber}</span>.
             </p>
 
-            <div className="max-w-md mx-auto bg-slate-50 rounded-xl p-5 border border-slate-100 text-left text-xs mb-8">
-              <div className="flex justify-between items-center pb-2.5 mb-2.5 border-b border-slate-200 font-semibold text-slate-700">
+            <div className="max-w-md mx-auto bg-slate-50 dark:bg-slate-900/50 rounded-xl p-5 border border-slate-100 dark:border-slate-700 text-left text-xs mb-8">
+              <div className="flex justify-between items-center pb-2.5 mb-2.5 border-b border-slate-200 dark:border-slate-700 font-semibold text-slate-700 dark:text-slate-300">
                 <span>Comprovante de Envio</span>
                 <span>Código Digital</span>
               </div>
-              <div className="space-y-1.5 text-slate-500 font-mono text-[10.5px]">
+              <div className="space-y-1.5 text-slate-500 dark:text-slate-400 font-mono text-[10.5px]">
                 <p>📊 Operação: {contract.contractNumber}</p>
                 <p>🏦 Banco: {contract.bankName}</p>
                 <p>💰 Valor Líquido: {formatBRL(contract.releasedValue)}</p>
