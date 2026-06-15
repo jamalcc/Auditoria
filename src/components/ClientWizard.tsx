@@ -1,7 +1,7 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Camera, Mic, MapPin, AlertCircle, RefreshCw, CheckCircle, Video, Check, Square, Shield, Eye, PenTool, Clock } from 'lucide-react';
 import { Contract, ContractStatus, ClientMetadata } from '../types';
-import { saveVideoBlob, addAuditLog, saveContracts, getContracts, uploadVideoToSupabase, syncWithSupabase, reconstructContractFromUrl } from '../services/db';
+import { saveVideoBlob, addAuditLog, saveContracts, getContracts, uploadVideoToSupabase, syncWithSupabase, reconstructContractFromUrl, pushContractToDB, fetchContractByIdDirectly } from '../services/db';
 
 interface ClientWizardProps {
   contractId: string;
@@ -14,6 +14,7 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [isAlreadySigned, setIsAlreadySigned] = useState(false);
   
   // Consent
   const [termConsent, setTermConsent] = useState(false);
@@ -28,19 +29,20 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
   // Webcam & Media Recorder State
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
   const videoPlaybackRef = useRef<HTMLVideoElement | null>(null);
+  const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   
-  const setVideoPreviewRef = (el: HTMLVideoElement | null) => {
+  const setVideoPreviewRef = useCallback((el: HTMLVideoElement | null) => {
     videoPreviewRef.current = el;
-    if (el && mediaStream) {
-      try {
-        el.srcObject = mediaStream;
-      } catch (err) {
-        console.warn('Erro ao associar stream ao elemento de video', err);
+    if (el) {
+      if (mediaStream) {
+        if (el.srcObject !== mediaStream) {
+          el.srcObject = mediaStream;
+        }
+      } else {
+        el.srcObject = null;
       }
     }
-  };
-
-  const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
+  }, [mediaStream]);
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null);
   const [recordedChunks, setRecordedChunks] = useState<Blob[]>([]);
   const [isRecording, setIsRecording] = useState(false);
@@ -96,6 +98,16 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
   useEffect(() => {
     const loadAndSyncContract = async () => {
       setLoading(true);
+      
+      // 1. Fetch fresh contract status directly from Database first to guarantee up-to-the-second validity
+      let directContract: Contract | null = null;
+      try {
+        directContract = await fetchContractByIdDirectly(contractId);
+      } catch (dbErr) {
+        console.error("Error direct-fetching contract on wizard mount:", dbErr);
+      }
+
+      // 2. Perform general background sync
       try {
         await syncWithSupabase();
       } catch (e) {
@@ -103,13 +115,14 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
       }
       
       const contracts = getContracts();
-      let currentContract = contracts.find(c => c.id === contractId);
+      let currentContract = directContract || contracts.find(c => c.id === contractId);
       if (!currentContract) {
         const reconstructed = reconstructContractFromUrl(contractId);
         if (reconstructed) {
           currentContract = reconstructed;
         }
       }
+
       if (currentContract) {
         const createdTime = new Date(currentContract.createdAt).getTime();
         const isExpired = (Date.now() - createdTime) > 24 * 60 * 60 * 1000;
@@ -117,9 +130,18 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
         if (isExpired && currentContract.status === 'Pendente') {
           setErrorMessage('Este link de formalização expirou por exceder o limite de 24 horas. Por favor, entre em contato com o suporte ou operador da promotora financeira para reativar/renovar a validade do seu link.');
           setContract(currentContract);
+        } else if (currentContract.status === 'Gravado' || currentContract.status === 'Aprovado') {
+          // If contract is already completed, mark as already signed to block duplicate links or camera UI immediately
+          setContract(currentContract);
+          setIsAlreadySigned(true);
+          addAuditLog(contractId, 'Link Acessado (Já Formalizado)', `Cliente tentou reabrir o link do contrato ${currentContract.contractNumber} (Status: ${currentContract.status}). Acesso ao fluxo de gravação bloqueado.`);
         } else {
           setContract(currentContract);
+          setIsAlreadySigned(false);
           addAuditLog(contractId, 'Link Acessado', `Cliente acessou o link do contrato ${currentContract.contractNumber}. Iniciando fluxo de formalização.`);
+          
+          // Trigger camera & microphone permissions automatically on component mount
+          requestPermissions();
         }
       } else {
         setErrorMessage('Contrato não localizado. Solicite uma nova guia de formalização.');
@@ -505,37 +527,36 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
         timestampSigned: new Date().toISOString()
       };
 
-      // Get, modify & persist updated contracts metadata
+      // Prepare fully updated contract
+      const updatedContract: Contract = {
+        ...contract,
+        status: ContractStatus.RECORDED,
+        signatureImage: signatureDataUrl,
+        videoBlobKey: videoBlobKey || contract.videoBlobKey,
+        metadata: richMetadata,
+        verifiedAt: new Date().toISOString()
+      };
+
+      // Get, modify & persist updated contracts metadata locally
       const allContracts = getContracts();
-      const updatedList = allContracts.map(c => {
-        if (c.id === contract.id) {
-          return {
-            ...c,
-            status: ContractStatus.RECORDED,
-            signatureImage: signatureDataUrl,
-            videoBlobKey: videoBlobKey || c.videoBlobKey,
-            metadata: richMetadata,
-            verifiedAt: new Date().toISOString()
-          };
-        }
-        return c;
-      });
-      
+      const updatedList = allContracts.map(c => c.id === contract.id ? updatedContract : c);
       saveContracts(updatedList);
       
-      // Create detailed logs
+      // CRITICAL FOR ADMIN REAL-TIME DISCOVERY: Push updated status and details to Supabase database if configured!
+      try {
+        await pushContractToDB(updatedContract);
+      } catch (dbErr) {
+        console.error('Error pushing updated contract status to DB:', dbErr);
+      }
+      
+      // Create detailed logs (which auto-sync to Supabase via our updated addAuditLog definition!)
       addAuditLog(contract.id, 'Vídeo Gravado', `Vídeo de confirmação gravado e indexado em IndexedDB. Tamanho: ${recordedBlob?.size ? (recordedBlob.size / 1024 / 1024).toFixed(2) : 0} MB.`);
       addAuditLog(contract.id, 'Contrato Confirmado por Vídeo', 'Cliente deu confirmação em vídeo confirmando os termos de contratação.');
       addAuditLog(contract.id, 'Formalização Concluída', `Processo de confirmação em vídeo integrado com sucesso. IP: ${ipAddress}`);
 
       // Turn off webcam streaming entirely
       stopWebcamStream();
-      setContract({
-        ...contract,
-        status: ContractStatus.RECORDED,
-        signatureImage: signatureDataUrl,
-        metadata: richMetadata
-      });
+      setContract(updatedContract);
       setStep(6); // Go to finished page
     } catch (err) {
       console.error('Falha na submissão de dados', err);
@@ -569,6 +590,68 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
 
   // Format currency
   const formatBRL = (v: number) => v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+
+  if (isAlreadySigned) {
+    return (
+      <div className="max-w-xl mx-auto my-12 bg-white dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 rounded-2xl p-8 shadow-2xl border border-slate-100 text-center" id="contract-already-signed-view">
+        <div className="w-16 h-16 bg-emerald-50 dark:bg-emerald-950/30 rounded-full flex items-center justify-center mx-auto mb-4">
+          <Shield className="w-8 h-8 text-emerald-600 dark:text-emerald-400 animate-pulse" />
+        </div>
+        <div className="mb-4 inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900 text-emerald-800 dark:text-emerald-300 rounded-full text-[10.5px] font-bold uppercase tracking-wide">
+          <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-450" /> Formalização Já Concluída
+        </div>
+        <h2 className="text-xl font-display font-bold text-slate-800 dark:text-white mb-2">Contrato Já Assinado & Formalizado</h2>
+        <p className="text-slate-500 dark:text-slate-400 text-xs mb-6 max-w-md mx-auto leading-relaxed">
+          Olá, <strong className="text-slate-700 dark:text-slate-300">{contract.clientName}</strong>. Esta proposta sob o número de contrato <strong className="font-mono text-teal-600 dark:text-teal-400">{contract.contractNumber}</strong> já se encontra finalizada e registrada em nossa base de dados oficial com gravação biométrica.
+        </p>
+        
+        <div className="bg-slate-50 dark:bg-slate-900/50 rounded-xl p-5 border border-slate-100 dark:border-slate-700 text-left text-xs mb-6 space-y-3">
+          <h4 className="font-semibold text-slate-700 dark:text-slate-300 pb-1.5 border-b border-slate-200 dark:border-slate-700 flex justify-between">
+            <span>Comprovante de Registro</span>
+            <span className="text-emerald-600 font-mono text-[9px] uppercase tracking-wider">✓ AUTÊNTICO</span>
+          </h4>
+          <div className="grid grid-cols-2 gap-y-3 gap-x-4 text-[11px] text-slate-500 dark:text-slate-400">
+            <div>
+              <span className="block text-[9px] text-slate-400 uppercase font-sans">Status da Proposta</span>
+              <span className="font-bold text-emerald-600 uppercase">{contract.status}</span>
+            </div>
+            <div>
+              <span className="block text-[9px] text-slate-400 uppercase font-sans">Inscrição CPF</span>
+              <span className="font-semibold text-slate-700 dark:text-slate-300 font-mono">{contract.clientCpf}</span>
+            </div>
+            <div>
+              <span className="block text-[9px] text-slate-400 uppercase font-sans">Banco Parceiro</span>
+              <span className="font-semibold text-slate-700 dark:text-slate-300">{contract.bankName}</span>
+            </div>
+            <div>
+              <span className="block text-[9px] text-slate-400 uppercase font-sans">Valor Líquido</span>
+              <span className="font-bold text-slate-800 dark:text-white">{formatBRL(contract.releasedValue)}</span>
+            </div>
+          </div>
+          {contract.verifiedAt && (
+            <div className="pt-2 border-t border-slate-200 dark:border-slate-700 text-[10px] text-slate-400 flex justify-between font-mono">
+              <span>Finalizado em:</span>
+              <span>{new Date(contract.verifiedAt).toLocaleString('pt-BR')}</span>
+            </div>
+          )}
+        </div>
+        
+        <p className="text-[10px] text-slate-400 max-w-xs mx-auto leading-normal">
+          Para sua segurança e conformidade antifraude, os acessos à câmera de segurança e ao painel de assinatura digital foram encerrados para este link.
+        </p>
+        
+        {onBackToAdmin && (
+          <button
+            type="button"
+            onClick={onBackToAdmin}
+            className="mt-6 w-full py-2.5 bg-slate-800 hover:bg-slate-700 dark:bg-slate-700 dark:hover:bg-slate-600 text-white rounded-xl text-xs font-semibold shadow-xs transition cursor-pointer"
+          >
+            Voltar ao Painel Administrativo
+          </button>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-6">
@@ -716,8 +799,8 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
                     Câmera de Segurança
                   </span>
 
-                  {/* Recorder Display Box */}
-                  <div className="w-full bg-slate-950 aspect-video rounded-xl overflow-hidden relative border border-slate-800 shadow-inner flex flex-col items-center justify-center">
+                   {/* Recorder Display Box (Optimized with aspect-video standard 16:9) */}
+                  <div className="w-full max-w-md mx-auto bg-slate-950 aspect-video rounded-2xl overflow-hidden relative border border-slate-800 shadow-2xl flex flex-col items-center justify-center">
                     
                     {recordedVideoUrl ? (
                       /* Display recorded outcome preview */
@@ -742,40 +825,29 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
                           className="w-full h-full object-cover"
                         />
                       )
+                    ) : mediaStream ? (
+                      /* Combined active stream rendering: Keeps the EXACT same tag mounted to ensure zero flicker when going from standby to active recording */
+                      <video
+                        ref={setVideoPreviewRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-full object-cover scale-x-[-1]"
+                      />
                     ) : isRecording ? (
-                      /* Currently recording */
-                      mediaStream ? (
-                        <video
-                          ref={setVideoPreviewRef}
-                          autoPlay
-                          playsInline
-                          muted
-                          className="w-full h-full object-cover scale-x-[-1]"
-                        />
-                      ) : (
-                        <div className="text-center p-6 text-slate-300">
-                          <div className="w-10 h-10 rounded-full border-4 border-rose-500 border-t-transparent animate-spin mx-auto mb-3" />
-                          <span className="text-xs font-bold text-rose-400 uppercase tracking-widest block mb-1">🔴 GRAVANDO</span>
-                          <p className="text-[9px] text-slate-400">Dica: Leia o roteiro legal azul ao lado...</p>
-                        </div>
-                      )
+                      /* Simulated recording fallback when no webcam is running */
+                      <div className="text-center p-6 text-slate-300">
+                        <div className="w-10 h-10 rounded-full border-4 border-rose-500 border-t-transparent animate-spin mx-auto mb-3" />
+                        <span className="text-xs font-bold text-rose-400 uppercase tracking-widest block mb-1">🔴 GRAVANDO</span>
+                        <p className="text-[9px] text-slate-400">Dica: Leia o roteiro legal azul ao lado...</p>
+                      </div>
                     ) : (
-                      /* Standard standby camera */
-                      mediaStream ? (
-                        <video
-                          ref={setVideoPreviewRef}
-                          autoPlay
-                          playsInline
-                          muted
-                          className="w-full h-full object-cover scale-x-[-1]"
-                        />
-                      ) : (
-                        <div className="text-center p-6 text-slate-400 space-y-2">
-                          <Video className="w-10 h-10 mx-auto text-slate-500 dark:text-slate-400/80" />
-                          <p className="text-xs font-semibold">Câmera em espera</p>
-                          <p className="text-[9.5px] text-slate-400 max-w-xs mx-auto">Ative as permissões para carregar seu feed técnico de conformidade.</p>
-                        </div>
-                      )
+                      /* Standard standby camera (asking user for permissions) */
+                      <div className="text-center p-6 text-slate-400 space-y-2">
+                        <Video className="w-10 h-10 mx-auto text-slate-500 dark:text-slate-400/80 animate-pulse" />
+                        <p className="text-xs font-semibold">Câmera em espera</p>
+                        <p className="text-[9.5px] text-slate-400 max-w-xs mx-auto">A permissão da câmera será solicitada para iniciar o feed de conformidade.</p>
+                      </div>
                     )}
 
                     {/* Left/Right Absolute Badges overlay */}
@@ -803,18 +875,6 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
                   {/* Camera control buttons */}
                   <div className="mt-4 space-y-2.5">
                     
-                    {!mediaStream && !recordedVideoUrl && (
-                      <button
-                        type="button"
-                        onClick={requestPermissions}
-                        disabled={loading}
-                        className="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl shadow-xs transition flex justify-center items-center gap-2"
-                      >
-                        {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
-                        Ativar Câmera e Microfone
-                      </button>
-                    )}
-
                     {!recordedVideoUrl ? (
                       !isRecording ? (
                         <button
@@ -900,6 +960,12 @@ export default function ClientWizard({ contractId, onComplete, onBackToAdmin }: 
             <div className="w-20 h-20 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-6">
               <CheckCircle className="w-12 h-12 text-emerald-500 animate-bounce" />
             </div>
+            
+            {isAlreadySigned && (
+              <div className="mb-4 inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-400 rounded-full text-[10px] font-bold uppercase tracking-wide">
+                <Check className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" /> Formalização já efetuada com sucesso
+              </div>
+            )}
             
             <h2 className="text-xl md:text-2xl font-display font-bold text-slate-800 dark:text-white mb-2">Formalização Realizada com Sucesso!</h2>
             <p className="text-slate-500 dark:text-slate-400 text-xs max-w-lg mx-auto mb-8">

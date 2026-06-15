@@ -294,6 +294,11 @@ export function addAuditLog(contractId: string, action: string, description: str
     description
   };
   localStorage.setItem(LOGS_KEY, JSON.stringify([newLog, ...logs]));
+  
+  if (supabase) {
+    pushLogToDB(newLog).catch(err => console.error('Error auto-syncing audit log to Supabase:', err));
+  }
+  
   return newLog;
 }
 
@@ -628,4 +633,28 @@ export function reconstructContractFromUrl(contractId: string): Contract | null 
   }
   return null;
 }
+
+// Fetches the most up-to-date state of a single contract directly from Supabase DB to guarantee no stale validation links.
+export async function fetchContractByIdDirectly(contractId: string): Promise<Contract | null> {
+  if (!supabase) return null;
+  try {
+    const { data, error } = await supabase
+      .from('contracts')
+      .select('*')
+      .eq('id', contractId)
+      .maybeSingle();
+      
+    if (error) {
+      console.error('Error fetching single contract from Supabase:', error);
+      return null;
+    }
+    if (data) {
+      return mapToLocalContract(data);
+    }
+  } catch (err) {
+    console.error('Exception fetching single contract from Supabase:', err);
+  }
+  return null;
+}
+
 
