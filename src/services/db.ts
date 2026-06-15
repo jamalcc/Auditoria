@@ -410,7 +410,7 @@ export async function syncWithSupabase(): Promise<{ contracts: Contract[], logs:
       mergedContractsMap.set(remoteContract.id, remoteContract);
     });
 
-    const localOnlyContractsToUpload: Contract[] = [];
+    const contractsToUpload: Contract[] = [];
 
     // Merge in local contracts
     localContracts.forEach(localContract => {
@@ -419,10 +419,18 @@ export async function syncWithSupabase(): Promise<{ contracts: Contract[], logs:
         // If contract exists in both places, merge them
         const merged = mergeTwoContracts(localContract, existing);
         mergedContractsMap.set(localContract.id, merged);
+        
+        // If the merged contract has a different status or detail state than remote,
+        // we must upload it back to Supabase so it updates in real-time.
+        const mergedDb = mapToDbContract(merged);
+        const existingDb = mapToDbContract(existing);
+        if (JSON.stringify(mergedDb) !== JSON.stringify(existingDb)) {
+          contractsToUpload.push(merged);
+        }
       } else {
         // Exists locally but not on Supabase (newly created and not synced yet)
         mergedContractsMap.set(localContract.id, localContract);
-        localOnlyContractsToUpload.push(localContract);
+        contractsToUpload.push(localContract);
       }
     });
 
@@ -450,11 +458,11 @@ export async function syncWithSupabase(): Promise<{ contracts: Contract[], logs:
     localStorage.setItem(CONTRACTS_KEY, JSON.stringify(finalMergedContracts));
     localStorage.setItem(LOGS_KEY, JSON.stringify(finalMergedLogs));
 
-    // 6. Asynchronously upload local-only additions up to Supabase to keep them backed up
-    if (localOnlyContractsToUpload.length > 0) {
-      const toInsert = localOnlyContractsToUpload.map(mapToDbContract);
+    // 6. Asynchronously upload local-only additions or modifications up to Supabase to keep them backed up
+    if (contractsToUpload.length > 0) {
+      const toInsert = contractsToUpload.map(mapToDbContract);
       supabase.from('contracts').upsert(toInsert).then(({ error }) => {
-        if (error) console.error('Error uploading local-only contracts to Supabase:', error);
+        if (error) console.error('Error uploading contracts synchronization to Supabase:', error);
       });
     }
 
@@ -566,30 +574,10 @@ export async function retrieveVideoUrl(contractId: string): Promise<string | nul
   return null;
 }
 
-// Generates a fully self-contained shareable URL in case database/localStorage mismatch occurs (e.g. sharing across devices without Supabase).
+// Generates an elegant and short shareable URL referencing the contract ID.
 export function generateShareLink(contract: Contract): string {
   const baseUrl = window.location.origin + window.location.pathname;
-  const payload = {
-    id: contract.id,
-    num: contract.contractNumber,
-    name: contract.clientName,
-    cpf: contract.clientCpf,
-    bank: contract.bankName,
-    val: contract.releasedValue,
-    instVal: contract.installmentValue,
-    instCnt: contract.installmentsCount,
-    date: contract.createdAt,
-    status: contract.status
-  };
-  
-  try {
-    const jsonStr = JSON.stringify(payload);
-    const encodedPayload = btoa(unescape(encodeURIComponent(jsonStr)));
-    return `${baseUrl}?formalizar=${contract.id}&payload=${encodedPayload}`;
-  } catch (e) {
-    console.error('Error encoding contract payload for link:', e);
-    return `${baseUrl}?formalizar=${contract.id}`;
-  }
+  return `${baseUrl}?formalizar=${contract.id}`;
 }
 
 // Attempts to reconstruct a missing contract on the client device if it is passed as a robust self-contained URL parameter.

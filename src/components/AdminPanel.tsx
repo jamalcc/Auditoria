@@ -111,15 +111,8 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
 
     // Auto-refresh/poll contracts from localStorage (and Supabase) every 4 seconds softly
     const interval = setInterval(() => {
-      const freshContracts = getContracts();
-      setContracts((prev) => {
-        if (JSON.stringify(prev) !== JSON.stringify(freshContracts)) {
-          return freshContracts;
-        }
-        return prev;
-      });
-
       if (supabase) {
+        // If Supabase is active, only sync from Supabase to prevent local-to-remote race status overrides
         syncWithSupabase().then((result) => {
           if (result && result.contracts) {
             setContracts((prev) => {
@@ -129,6 +122,15 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
               return prev;
             });
           }
+        });
+      } else {
+        // Fall back to localStorage only if Supabase is offline
+        const freshContracts = getContracts();
+        setContracts((prev) => {
+          if (JSON.stringify(prev) !== JSON.stringify(freshContracts)) {
+            return freshContracts;
+          }
+          return prev;
         });
       }
     }, 4000);
@@ -350,13 +352,15 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
 
   // Status changing logic
   const handleUpdateStatus = (id: string, newStatus: ContractStatus, reason?: string) => {
+    let updatedContractObject: Contract | null = null;
     const updated = contracts.map(c => {
       if (c.id === id) {
-        return {
+        updatedContractObject = {
           ...c,
           status: newStatus,
           rejectionReason: reason || undefined
         };
+        return updatedContractObject;
       }
       return c;
     });
@@ -369,6 +373,13 @@ export default function AdminPanel({ onSelectContractForWizard }: AdminPanelProp
         ? 'Vídeo e biometria fiscal validados positivamente pelo auditor.'
         : `Proposta rejeitada. Motivo: ${reason}`
     );
+
+    // Push changes immediately to Supabase
+    if (updatedContractObject) {
+      pushContractToDB(updatedContractObject).catch(err => 
+        console.error('Error immediately pushing status change to Supabase:', err)
+      );
+    }
 
     setContracts(updated);
     
